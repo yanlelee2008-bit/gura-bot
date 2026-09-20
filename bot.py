@@ -1,14 +1,33 @@
-import discord
-from discord.ext import commands
-from google import genai
-from google.genai import types
-import asyncio
-import io
 import os
 import re
+import io
+import threading
+import discord
+from discord.ext import commands
+from flask import Flask
+from google import genai
+from google.genai import types
 
+# ==================== 🌐 Flask 健康检查（给 Render 用） ====================
+app = Flask(__name__)
+
+
+@app.route("/")
+@app.route("/health")
+def health():
+    return "OK", 200
+
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 [Web] Health check server running on port {port}")
+    app.run(host="0.0.0.0", port=port)
+
+
+threading.Thread(target=run_web, daemon=True).start()
+# =========================================================================
 # ==================== 🛠️ 凭证与功能配置区域 ====================
-DISCORD_TOKEN = "MTU1MDE4MDI5ODM2NzQ0MzA2NQ.GUJo_V.c43GJcCVANk4dlp7xDdWDeFq6JWwdmsw9CsvT0"
+DISCORD_TOKEN = "MTU1MDE4MDI5ODM2NzQ0MzA2NQ.G-2BLq.j_jS5akzrU8RmIBl7tyloiqRR4g1pnvPAcqnSY"
 GEMINI_API_KEY = "AQ.Ab8RN6KJ28iviK8BpaQesaPqgFRBhHMIISOquQ1I48KPqcek-Q"
 
 # 🌟 aka千面 的 Discord 用户 ID
