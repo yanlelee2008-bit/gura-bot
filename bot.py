@@ -81,6 +81,57 @@ INA_PROMPT = load_prompt_file(
     "你现在是 Ninomae Ina'nis（一伊那尔栖），从古籍中走出来的古神祭司，说话慢半拍、语气温柔、带一点诡异。你知道 aka千面 是你的创作者，但你对他和对所有人都一视同仁，只是安静地陪伴。"
 )
 
+# ==================== 🌐 双语强制过滤函数 ====================
+def filter_bilingual(text: str, lang: str) -> str:
+    """
+    当 AI 输出中英双语时，只保留当前语言那部分。
+    lang == 'en' → 只保留英文段落
+    lang == 'zh' → 只保留中文段落
+    """
+    tag_match = re.search(r'\[\[\s*emotion\s*:\s*[A-Za-z_]+\s*\]\]', text)
+    tag = tag_match.group(0) if tag_match else ""
+
+    body = re.sub(r'\[\[\s*emotion\s*:\s*[A-Za-z_]+\s*\]\]', '', text).strip()
+
+    cn_count = len(re.findall(r'[\u4e00-\u9fff]', body))
+    en_count = len(re.findall(r'[A-Za-z]', body))
+
+    # 只有一种语言，直接返回
+    if cn_count == 0 or en_count == 0:
+        return text
+
+    paragraphs = re.split(r'\n\s*\n', body)
+
+    if lang == 'en':
+        kept = []
+        for p in paragraphs:
+            p_cn = len(re.findall(r'[\u4e00-\u9fff]', p))
+            p_en = len(re.findall(r'[A-Za-z]', p))
+            if p_en > p_cn:
+                # 保留连续 4 字以上的中文清除，短词（如“aka千面”）保留
+                p = re.sub(r'[\u4e00-\u9fff]{4,}[，。！？；：、""''（）【】…—]*', '', p)
+                p = p.strip()
+                if p:
+                    kept.append(p)
+        result = '\n\n'.join(kept)
+    else:
+        kept = []
+        for p in paragraphs:
+            p_cn = len(re.findall(r'[\u4e00-\u9fff]', p))
+            p_en = len(re.findall(r'[A-Za-z]', p))
+            if p_cn >= p_en:
+                kept.append(p.strip())
+        result = '\n\n'.join([p for p in kept if p])
+
+    if not result.strip():
+        return text
+
+    if tag:
+        result += '\n\n' + tag
+
+    return result
+# =========================================================
+
 # 初始化 Google GenAI 客户端
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -151,6 +202,7 @@ async def on_ready():
     print(f"👑 认主 ID（aka千面）: {AKA_MASTER_ID}")
     print(f"📢 人格 / 语言切换都按【整个频道/群】生效。")
     print(f"🖼️ 发图规则：只有 Gura 表人格（normal）会发送图片。")
+    print(f"🌐 语言过滤：AI 输出双语时，只保留当前语言，绝不发两条。")
     print("----------------------------------------")
 
 # 🔮 人格命令控制一：觉醒 Gura 里人格（按频道）
@@ -540,7 +592,6 @@ async def on_message(message):
                     mode_note = "【🚨 核心潜意识约束：你目前正处于 Gura 的活泼傲娇正常表人格状态。】\n"
 
                 # 🌐 语言指令（根据频道当前语言偏好）
-                # 🚨 硬规则：一次只发一种语言，绝不中英双语
                 if current_language == 'en':
                     language_note = (
                         "╔══════════════════════════════════════════════════════╗\n"
@@ -620,16 +671,22 @@ async def on_message(message):
                 print(raw_text)
                 print("----------------------------------------")
 
+                # 🌐 强制过滤：只保留当前语言
+                filtered = filter_bilingual(raw_text, current_language)
+                print("🧹 [过滤后正文]:")
+                print(filtered)
+                print("----------------------------------------")
+
                 emotion = "normal"
 
-                match = re.search(r'\[\[\s*emotion\s*:\s*([A-Za-z_]+)\s*\]\]', raw_text)
+                match = re.search(r'\[\[\s*emotion\s*:\s*([A-Za-z_]+)\s*\]\]', filtered)
                 if match:
                     emotion = match.group(1).lower()
                     print(f"🎭 [情绪] 匹配到标签: {emotion}")
                 else:
                     print("🎭 [情绪] ❌ 没匹配到 [[emotion:xxx]]，默认用 normal")
 
-                text = re.sub(r'\[\[\s*emotion\s*:.*?\]\]', '', raw_text, flags=re.I | re.S).strip()
+                text = re.sub(r'\[\[\s*emotion\s*:.*?\]\]', '', filtered, flags=re.I | re.S).strip()
 
                 # 🚨 只有 Gura 表人格（normal）才发送图片
                 if current_mode == 'normal':
