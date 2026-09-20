@@ -1,16 +1,15 @@
-# This is a sample Python script.
+import os
+import staypresent
 
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+# 提供一个健康检查接口，Render 会定期访问这个地址来判断服务是否正常
+staypresent.web.json({"status": "running"})
 
+# 设置自 ping，每 4 分钟访问一次自己的公网地址，防止 Render 休眠
+# 请把下面的 URL 换成你部署后 Render 分配的真实地址
+staypresent.cron("https://gura-bot.onrender.com", interval=240)
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
-
-
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+# 启动 bot.py，并让它监听 Render 分配的端口
+staypresent.run(
+    "bot.py",
+    port=int(os.getenv("PORT", 8080)),
+)
