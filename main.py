@@ -1,6 +1,6 @@
 import os
 import threading
-from keep_alive_ping import create_service
+import subprocess
 from flask import Flask
 
 app = Flask(__name__)
@@ -10,10 +10,9 @@ def health():
     return {"status": "running"}
 
 def run_bot():
-    os.system("python bot.py")
+    subprocess.run(["python", "bot.py"])
 
 if __name__ == "__main__":
-    service = create_service(port=10000)
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     port = int(os.getenv("PORT", 8080))
