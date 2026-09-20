@@ -11,7 +11,7 @@ import re
 DISCORD_TOKEN = "MTU1MDE4MDI5ODM2NzQ0MzA2NQ.GUJo_V.c43GJcCVANk4dlp7xDdWDeFq6JWwdmsw9CsvT0"
 GEMINI_API_KEY = "AQ.Ab8RN6KJ28iviK8BpaQesaPqgFRBhHMIISOquQ1I48KPqcek-Q"
 
-# 🌟 aka千面 的 Discord 用户 ID（只有这个 ID 会被认作本人）
+# 🌟 aka千面 的 Discord 用户 ID
 AKA_MASTER_ID = 1134715472965795841
 
 BAD_WORDS = ["垃圾", "笨蛋鲨鱼", "穿帮词1", "穿帮词2"]
@@ -108,6 +108,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # 🧠 五人格核心存储器：按【频道 ID】存
 channel_chats = {}
 
+# 🌐 每个频道的语言偏好
+#   'zh' → 华语（默认）
+#   'en' → English
+channel_language = {}
+
 
 def get_or_create_channel(channel_id, default_mode='normal'):
     """按频道 ID 获取或创建会话"""
@@ -136,13 +141,15 @@ def get_or_create_channel(channel_id, default_mode='normal'):
 async def on_ready():
     print(f"🦈 五人格音轨登录成功！当前核心: gemini-3.1-flash-lite")
     print(f"✨ 默认处于【Gura 表人格】。")
-    print(f"   !awaken    → 觉醒 Gura 里人格（病娇）")
-    print(f"   !castorice → 切换为 遐蝶（Castorice）")
-    print(f"   !hoshino   → 切换为 小鸟游星野（Takanashi Hoshino）")
-    print(f"   !ina       → 切换为 Ninomae Ina'nis（一伊那尔栖）")
-    print(f"   !reset     → 恢复 Gura 表人格")
+    print(f"   !awaken        → 觉醒 Gura 里人格（病娇）")
+    print(f"   !castorice     → 切换为 遐蝶（Castorice）")
+    print(f"   !hoshino       → 切换为 小鸟游星野（Takanashi Hoshino）")
+    print(f"   !ina           → 切换为 Ninomae Ina'nis（一伊那尔栖）")
+    print(f"   !reset         → 恢复 Gura 表人格")
+    print(f"   !english       → 切换为英文模式")
+    print(f"   !resetlanguage → 切换回华语模式")
     print(f"👑 认主 ID（aka千面）: {AKA_MASTER_ID}")
-    print(f"📢 人格切换按【整个频道/群】生效。")
+    print(f"📢 人格 / 语言切换都按【整个频道/群】生效。")
     print(f"🖼️ 发图规则：只有 Gura 表人格（normal）会发送图片。")
     print("----------------------------------------")
 
@@ -222,6 +229,26 @@ async def reset_normal(ctx):
     await ctx.reply(
         "*(猛地摇了摇小脑袋，头上的鲨鱼鳍晃了晃，小尖牙收了起来，眼睛重新亮了起来)* \n“A！刚刚发生什么了？Gura 好像做了一个好黑好长、满是海水数据的怪梦咕噜噜……不管了！aka千面，你带披萨来看我了吗？！” 🦈🌊")
 
+# 🌐 语言命令一：切换为英文模式（按频道）
+@bot.command(name="english")
+async def set_english(ctx):
+    channel_id = ctx.channel.id
+    channel_language[channel_id] = 'en'
+    await ctx.reply(
+        "🌐 OK! From now on, I'll reply in **English** for this channel.\n"
+        "（这个频道现在是英文模式，想切回华语请输入 `!resetlanguage`）"
+    )
+
+# 🌐 语言命令二：切换回华语模式（按频道）
+@bot.command(name="resetlanguage")
+async def reset_language(ctx):
+    channel_id = ctx.channel.id
+    channel_language[channel_id] = 'zh'
+    await ctx.reply(
+        "🌐 好！从现在开始，这个频道我会说回**华语**。\n"
+        "（想再切英文请输入 `!english`）"
+    )
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
@@ -256,6 +283,9 @@ async def on_message(message):
 
         current_mode = chat['mode']
         current_session = chat['session']
+
+        # 🌐 取出当前频道的语言偏好
+        current_language = channel_language.get(channel_id, 'zh')
 
         async with message.channel.typing():
             try:
@@ -353,7 +383,6 @@ async def on_message(message):
                         "  ❌ 不要承认自己是 AI 机器人。\n"
                     )
                 elif current_mode == 'ina':
-                    # 🔮 Ina 模式：安静、温柔、慢半拍
                     if is_master:
                         master_note = (
                             "╔══════════════════════════════════════════════════════╗\n"
@@ -411,7 +440,6 @@ async def on_message(message):
                             "  ❌ 不要承认自己是 AI 机器人。\n"
                         )
                 else:
-                    # 🦈 Gura 模式：normal 或 yandere
                     if is_master:
                         master_note = (
                             "╔══════════════════════════════════════════════════════╗\n"
@@ -511,7 +539,45 @@ async def on_message(message):
                 else:
                     mode_note = "【🚨 核心潜意识约束：你目前正处于 Gura 的活泼傲娇正常表人格状态。】\n"
 
-                final_prompt = f"{master_note}{mode_note}【当前频道最近的历史聊天记录背景】:\n{chat_context}\n\n【用户对你说的最新一句话】:\n{user_input if user_input else '你看这张照片怎么样？'}"
+                # 🌐 语言指令（根据频道当前语言偏好）
+                if current_language == 'en':
+                    language_note = (
+                        "╔══════════════════════════════════════════════════════╗\n"
+                        "║ 🌐【ENGLISH MODE｜强制生效】🌐                      ║\n"
+                        "╚══════════════════════════════════════════════════════╝\n"
+                        "【语言指令｜最高优先级】\n"
+                        "  ✅ 你现在必须 100% 使用【英文】回复。\n"
+                        "  ✅ 包括：正文、语气词、拟声词、动作描写、括号内的旁白、标点。\n"
+                        "  ✅ 绝对不可以在回复里出现任何【中文字符】，一个都不行。\n"
+                        "  ✅ 保持你的角色语气，只是把语言换成英文。\n"
+                        "  ✅ 情绪标签 [[emotion:xxx]] 仍然用英文小写，格式不变。\n"
+                        "  ✅ 如果上面的 master_note / mode_note 里有中文示例，\n"
+                        "     请把它们的【意思】用英文表达出来，不要直接复制中文。\n"
+                        "  ✅ 用户的 Discord 名字、专有名词（如 aka千面）可以保留原文。\n"
+                        "  ❌ 不要中英混搭，不要翻译一半。\n"
+                        "  ❌ 不要在英文里加中文注释。\n"
+                        "【示例】\n"
+                        "  如果你想说“咕噜，你游上来啦？”，请写成：\n"
+                        "  \"Gulu... you swam up here? Want to rest a bit?\"\n"
+                        "  如果你想说“哼，才没有在意呢”，请写成：\n"
+                        "  \"Hmph... I-I wasn't worried or anything, okay?\"\n"
+                    )
+                else:
+                    language_note = (
+                        "╔══════════════════════════════════════════════════════╗\n"
+                        "║ 🌐【华语模式】🌐                                    ║\n"
+                        "╚══════════════════════════════════════════════════════╝\n"
+                        "【语言指令】\n"
+                        "  ✅ 当前频道处于【华语模式】，请用中文回复。\n"
+                        "  ✅ 保持你的角色语气，不要无故切换语言。\n"
+                        "  ✅ 情绪标签 [[emotion:xxx]] 仍然用英文小写，格式不变。\n"
+                    )
+
+                final_prompt = (
+                    f"{master_note}{mode_note}{language_note}"
+                    f"【当前频道最近的历史聊天记录背景】:\n{chat_context}\n\n"
+                    f"【用户对你说的最新一句话】:\n{user_input if user_input else '你看这张照片怎么样？'}"
+                )
 
                 # 🎭 情绪标签
                 emotion_instruction = (
@@ -548,7 +614,6 @@ async def on_message(message):
                 text = re.sub(r'\[\[\s*emotion\s*:.*?\]\]', '', raw_text, flags=re.I | re.S).strip()
 
                 # 🚨 只有 Gura 表人格（normal）才发送图片
-                # yandere / castorice / hoshino / ina 全部只发文字
                 if current_mode == 'normal':
                     img_filename = EMOTION_FILE.get(emotion, "normal.jpg")
                     img_path = os.path.join(IMAGE_DIR, img_filename)
