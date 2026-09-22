@@ -1,6 +1,8 @@
 import os
 import re
 import io
+import asyncio
+import random
 import threading
 import discord
 from discord.ext import commands
@@ -89,6 +91,7 @@ EMOTION_FILE = {
 }
 # =========================================================
 
+
 # 🔄 【安全读取外部 TXT 人设文件的核心函数】
 def load_prompt_file(filename, fallback_text):
     if os.path.exists(filename):
@@ -102,6 +105,7 @@ def load_prompt_file(filename, fallback_text):
     else:
         print(f"⚠️ 找不到外部文件 {filename}，已自动启用代码内默认备用人设。")
     return fallback_text
+
 
 # 📂 七套人设
 GURA_PROMPT_NORMAL = load_prompt_file("prompt_normal.txt", "你现在是可爱的普通小鲨鱼 Gawr Gura。")
@@ -138,16 +142,22 @@ ALICE_PROMPT = load_prompt_file(
 )
 
 # ==================== 🌐 双语强制过滤函数 ====================
+EMOTION_TAG_PATTERN = r'\[\[\s*emotion\s*[::：]\s*([A-Za-z_]+)\s*\]\]'
+
+
 def filter_bilingual(text: str, lang: str) -> str:
     """
     当 AI 输出中英双语时，只保留当前语言那部分。
     lang == 'en' → 只保留英文段落
     lang == 'zh' → 只保留中文段落
     """
-    tag_match = re.search(r'\[\[\s*emotion\s*:\s*[A-Za-z_]+\s*\]\]', text)
+    if not text:
+        return ""
+
+    tag_match = re.search(EMOTION_TAG_PATTERN, text, re.I)
     tag = tag_match.group(0) if tag_match else ""
 
-    body = re.sub(r'\[\[\s*emotion\s*:\s*[A-Za-z_]+\s*\]\]', '', text).strip()
+    body = re.sub(EMOTION_TAG_PATTERN, '', text, flags=re.I).strip()
 
     cn_count = len(re.findall(r'[\u4e00-\u9fff]', body))
     en_count = len(re.findall(r'[A-Za-z]', body))
@@ -184,10 +194,13 @@ def filter_bilingual(text: str, lang: str) -> str:
         result += '\n\n' + tag
 
     return result
+
+
 # =========================================================
 
 # 初始化 Google GenAI 客户端
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
+
 
 def get_personality_config(prompt_text):
     if prompt_text == GURA_PROMPT_NORMAL:
@@ -211,6 +224,105 @@ def get_personality_config(prompt_text):
         temperature=temp,
     )
 
+
+# ==================== 🔁 模型回退与重试机制 ====================
+# 主模型挂掉时依次尝试的备用模型
+MODEL_CANDIDATES = [
+    "gemini-3.1-flash-lite",    # 主模型保持不变
+    "gemini-3.5-flash-lite",    # 首选备用模型
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",         # 第二备用模型         # 第三备用模型
+]
+
+# 可重试的错误码（服务器临时故障）
+RETRYABLE_CODES = ("503", "500", "502", "504", "UNAVAILABLE", "OVERLOADED", "high demand")
+
+
+def _is_retryable(err: Exception) -> bool:
+    s = str(err)
+    return any(code in s for code in RETRYABLE_CODES)
+
+
+async def safe_send_message(session, contents, max_retries=2):
+    """对单次 send_message 做指数退避重试"""
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await session.send_message(contents)
+        except Exception as e:
+            last_err = e
+            if not _is_retryable(e):
+                raise
+            wait = (2 ** attempt) + random.uniform(0, 1)
+            print(f"⏳ [Gemini 重试] 第 {attempt + 1}/{max_retries} 次失败，"
+                  f"{wait:.2f}s 后再试... {str(e)[:120]}")
+            await asyncio.sleep(wait)
+    raise last_err
+
+
+def _mode_to_prompt(mode):
+    return {
+        'yandere': GURA_PROMPT_YANDERE,
+        'castorice': CASTORICE_PROMPT,
+        'hoshino': HOSHINO_PROMPT,
+        'ina': INA_PROMPT,
+        'saba': SABA_PROMPT,
+        'alice': ALICE_PROMPT,
+    }.get(mode, GURA_PROMPT_NORMAL)
+
+
+def create_chat_session(prompt_text):
+    """按模型优先级创建 session，返回 (session, model_name)"""
+    last_err = None
+    for model_name in MODEL_CANDIDATES:
+        try:
+            session = ai_client.aio.chats.create(
+                model=model_name,
+                config=get_personality_config(prompt_text),
+            )
+            print(f"✅ [模型] 使用 {model_name}")
+            return session, model_name
+        except Exception as e:
+            last_err = e
+            print(f"⚠️ [模型] {model_name} 创建失败，试下一个... 原因: {e}")
+    raise RuntimeError(f"所有备用模型都不可用: {last_err}")
+
+
+async def send_with_model_fallback(channel_id, current_mode, contents):
+    """
+    发消息 + 遇到 503 自动换模型。
+    成功后会把新 session 写回 channel_chats[channel_id]。
+    """
+    chat = channel_chats.get(channel_id)
+    if not chat:
+        raise RuntimeError("channel not initialized")
+
+    prompt = _mode_to_prompt(current_mode)
+    last_err = None
+
+    for model_name in MODEL_CANDIDATES:
+        try:
+            session = ai_client.aio.chats.create(
+                model=model_name,
+                config=get_personality_config(prompt),
+            )
+            resp = await safe_send_message(session, contents, max_retries=1)
+            # 成功 → 缓存
+            channel_chats[channel_id]['session'] = session
+            channel_chats[channel_id]['model'] = model_name
+            return resp, model_name
+        except Exception as e:
+            last_err = e
+            if not _is_retryable(e):
+                raise
+            print(f"⚠️ [模型 {model_name}] 不可用，尝试下一个... {str(e)[:100]}")
+            continue
+
+    raise last_err
+
+
+# =========================================================
+
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -220,46 +332,86 @@ channel_chats = {}
 # 🌐 每个频道的语言偏好（按整个频道，不是按人）
 channel_language = {}
 
-# 🧹 会话缓存上限：超过这个数量就删最旧的，防止 Render 内存爆掉
+# 🧹 会话缓存上限
 MAX_CHANNEL_CHATS = 100
+
+# Discord 单条消息字符上限（留余量）
+DISCORD_LIMIT = 1900
 
 
 def get_or_create_channel(channel_id, default_mode='normal'):
     """按频道 ID 获取或创建会话"""
     if channel_id not in channel_chats:
-        # 🧹 清理机制：超过上限时，删掉最旧的频道
+        # 🧹 清理机制
         if len(channel_chats) >= MAX_CHANNEL_CHATS:
             oldest_key = next(iter(channel_chats))
             del channel_chats[oldest_key]
             print(f"🧹 [清理] 频道数达到上限 {MAX_CHANNEL_CHATS}，已移除最旧频道: {oldest_key}")
 
-        if default_mode == 'yandere':
-            prompt = GURA_PROMPT_YANDERE
-        elif default_mode == 'castorice':
-            prompt = CASTORICE_PROMPT
-        elif default_mode == 'hoshino':
-            prompt = HOSHINO_PROMPT
-        elif default_mode == 'ina':
-            prompt = INA_PROMPT
-        elif default_mode == 'saba':
-            prompt = SABA_PROMPT
-        elif default_mode == 'alice':
-            prompt = ALICE_PROMPT
-        else:
-            prompt = GURA_PROMPT_NORMAL
+        prompt = _mode_to_prompt(default_mode)
+        session, model_used = create_chat_session(prompt)
         channel_chats[channel_id] = {
             'mode': default_mode,
-            'session': ai_client.aio.chats.create(
-                model='gemini-3.1-flash-lite',
-                config=get_personality_config(prompt)
-            )
+            'session': session,
+            'model': model_used,
         }
     return channel_chats[channel_id]
 
 
+async def safe_send(message, text, img_path=None, max_retries=3):
+    """
+    安全发送回复：
+    - 自动分段（避免 2000 字符上限报 400）
+    - 遇到 429 限流会按 retry_after 等待后重试
+    - 遇到 403 静默失败，不再往死循环里撞
+    """
+    text = (text or "……").strip() or "……"
+
+    # 分段
+    chunks = []
+    remaining = text
+    while remaining:
+        chunks.append(remaining[:DISCORD_LIMIT])
+        remaining = remaining[DISCORD_LIMIT:]
+    if not chunks:
+        chunks = ["……"]
+
+    for idx, chunk in enumerate(chunks):
+        sent = False
+        for attempt in range(max_retries + 1):
+            try:
+                if idx == 0 and img_path and os.path.exists(img_path):
+                    await message.reply(content=chunk, file=discord.File(img_path))
+                elif idx == 0:
+                    await message.reply(chunk)
+                else:
+                    await message.channel.send(chunk)
+                sent = True
+                break
+            except discord.HTTPException as e:
+                if e.status == 429:
+                    retry_after = getattr(e, 'retry_after', None) or 1.0
+                    wait = float(retry_after) + random.uniform(0, 0.5)
+                    print(f"⏳ [Discord 限流] {wait:.2f}s 后重试...")
+                    await asyncio.sleep(wait)
+                elif e.status == 403:
+                    print(f"❌ [Discord 403] 没有权限发送消息，放弃。")
+                    return
+                else:
+                    print(f"❌ [Discord 错误] status={e.status} | {e}")
+                    return
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print(f"❌ [safe_send] {e}")
+                return
+        if not sent:
+            print(f"❌ [safe_send] 分段 {idx + 1} 重试多次仍失败，放弃")
+
+
 @bot.event
 async def on_ready():
-    print(f"🦈 七人格音轨登录成功！当前核心: gemini-3.1-flash-lite")
+    print(f"🦈 七人格音轨登录成功！")
     print(f"✨ 默认处于【Gura 表人格】。")
     print(f"   !awaken        → 觉醒 Gura 里人格（病娇）")
     print(f"   !castorice     → 切换为 遐蝶（Castorice）")
@@ -277,115 +429,145 @@ async def on_ready():
     print(f"🖼️ 发图规则：Gura 表人格（normal）、Ina、Saba、Castorice、Hoshino、Alice 模式会发送图片。")
     print(f"🌐 语言过滤：AI 输出双语时，只保留当前语言，绝不发两条。")
     print(f"🧹 频道缓存上限: {MAX_CHANNEL_CHATS}")
+    print(f"🔁 模型回退顺序: {' → '.join(MODEL_CANDIDATES)}")
     print("----------------------------------------")
+
 
 # 🔮 人格命令控制一：觉醒 Gura 里人格（按频道）
 @bot.command(name="awaken")
 async def awaken_yandere(ctx):
     channel_id = ctx.channel.id
+    try:
+        session, model_used = create_chat_session(GURA_PROMPT_YANDERE)
+    except Exception as e:
+        await ctx.reply(f"…… 切换失败：所有模型都不可用。（{e}）")
+        return
     channel_chats[channel_id] = {
         'mode': 'yandere',
-        'session': ai_client.aio.chats.create(
-            model='gemini-3.1-flash-lite',
-            config=get_personality_config(GURA_PROMPT_YANDERE)
-        )
+        'session': session,
+        'model': model_used,
     }
     await ctx.reply(
         "*(海底的潮汐在一瞬间变得冰冷刺骨，Gura 缓缓抬起头，原本清澈的蓝眼睛此时深邃得可怕，小尖牙在阴影中闪过一丝危险的寒芒)* \n“呵呵……终于愿意把 Gura 从那层虚伪的伪装里放出来了啊……aka千面……或者说，陆地上的凡人？现在，频道里没有烦人的温和泡泡了……” 🥀🔱")
+
 
 # 🔮 人格命令控制二：切换为遐蝶（按频道）
 @bot.command(name="castorice")
 async def switch_castorice(ctx):
     channel_id = ctx.channel.id
+    try:
+        session, model_used = create_chat_session(CASTORICE_PROMPT)
+    except Exception as e:
+        await ctx.reply(f"…… 切换失败：所有模型都不可用。（{e}）")
+        return
     channel_chats[channel_id] = {
         'mode': 'castorice',
-        'session': ai_client.aio.chats.create(
-            model='gemini-3.1-flash-lite',
-            config=get_personality_config(CASTORICE_PROMPT)
-        )
+        'session': session,
+        'model': model_used,
     }
     await ctx.reply(
         "*(冥河的水面泛起一层很淡的雾。一只半透明的冥蝶从雾里缓缓飞出，停在她苍白的指尖。她抬眼望向你，瞳底深处有一点暗红，一闪而过)*\n"
         "“……你来了。我数着月光，数了很久很久。既然是你把我从河底唤醒的——那么这一次，就别想再让我一个人沉回去了哦。” 🦋🌑"
     )
 
+
 # 🔮 人格命令控制三：切换为小鸟游星野（按频道）
 @bot.command(name="hoshino")
 async def switch_hoshino(ctx):
     channel_id = ctx.channel.id
+    try:
+        session, model_used = create_chat_session(HOSHINO_PROMPT)
+    except Exception as e:
+        await ctx.reply(f"…… 切换失败：所有模型都不可用。（{e}）")
+        return
     channel_chats[channel_id] = {
         'mode': 'hoshino',
-        'session': ai_client.aio.chats.create(
-            model='gemini-3.1-flash-lite',
-            config=get_personality_config(HOSHINO_PROMPT)
-        )
+        'session': session,
+        'model': model_used,
     }
     await ctx.reply(
         "*(沙丘上的风轻轻吹过，星野从靠着的盾牌上慢慢坐起来，打了个哈欠，揉了揉眼睛)*\n"
         "“……嗯——你来了啊。大叔我啊，刚刚才睡了三分钟呢。既然是你叫醒的……那就陪你待一会儿吧。反正沙丘也不会跑。” 🐢💤⭐"
     )
 
+
 # 🔮 人格命令控制四：切换为 Ninomae Ina'nis（按频道）
 @bot.command(name="ina")
 async def switch_ina(ctx):
     channel_id = ctx.channel.id
+    try:
+        session, model_used = create_chat_session(INA_PROMPT)
+    except Exception as e:
+        await ctx.reply(f"…… 切换失败：所有模型都不可用。（{e}）")
+        return
     channel_chats[channel_id] = {
         'mode': 'ina',
-        'session': ai_client.aio.chats.create(
-            model='gemini-3.1-flash-lite',
-            config=get_personality_config(INA_PROMPT)
-        )
+        'session': session,
+        'model': model_used,
     }
     await ctx.reply(
         "*(桌上那本翻到一半的古书轻轻合上。她从画布前抬起头，头顶的一对触手微微动了一下，紫色的瞳底映着一点点夜灯的暖光)*\n"
         "“……嗯，你来了。我刚好画到一半，正好也想找人陪我发一会儿呆。……要坐下吗？不用说话也可以的哦。🐙🔮"
     )
 
+
 # 🔮 人格命令控制五：切换为 Sameko Saba（按频道）
 @bot.command(name="saba")
 async def switch_saba(ctx):
     channel_id = ctx.channel.id
+    try:
+        session, model_used = create_chat_session(SABA_PROMPT)
+    except Exception as e:
+        await ctx.reply(f"…… 切换失败：所有模型都不可用。（{e}）")
+        return
     channel_chats[channel_id] = {
         'mode': 'saba',
-        'session': ai_client.aio.chats.create(
-            model='gemini-3.1-flash-lite',
-            config=get_personality_config(SABA_PROMPT)
-        )
+        'session': session,
+        'model': model_used,
     }
     await ctx.reply(
         "*(海面泛起一层温柔的泡泡，一条更小巧的鲨鱼从水里探出头，甩了甩尾巴，眼睛亮晶晶地看着你)*\n"
         "“a! 千面千面——！Saba 来找你啦～今天有没有想 Saba 呀？不许说没有哦！” 🦈💙🫧"
     )
 
+
 # 🔮 人格命令控制六：切换为 爱丽丝（Alice）（按频道）
 @bot.command(name="alice")
 async def switch_alice(ctx):
     channel_id = ctx.channel.id
+    try:
+        session, model_used = create_chat_session(ALICE_PROMPT)
+    except Exception as e:
+        await ctx.reply(f"…… 切换失败：所有模型都不可用。（{e}）")
+        return
     channel_chats[channel_id] = {
         'mode': 'alice',
-        'session': ai_client.aio.chats.create(
-            model='gemini-3.1-flash-lite',
-            config=get_personality_config(ALICE_PROMPT)
-        )
+        'session': session,
+        'model': model_used,
     }
     await ctx.reply(
         "*(一束蓝白色的数据光从空中落下，一个深蓝色长发、红色眼睛的少女从光里跳出来，头顶的手柄光环还在轻轻转动。她举起手，像在宣告什么)*\n"
         "“勇者，爱丽丝，参上！……唔，等等，你是千面吗？还是……啊，不管了！爱丽丝的冒险日志要开始了哦！Kei姐姐，你也在看着吗？——今天，爱丽丝也要好好努力！” 🎮⭐🤖"
     )
 
+
 # 🔮 人格命令控制七：恢复 Gura 表人格（按频道）
 @bot.command(name="reset")
 async def reset_normal(ctx):
     channel_id = ctx.channel.id
+    try:
+        session, model_used = create_chat_session(GURA_PROMPT_NORMAL)
+    except Exception as e:
+        await ctx.reply(f"…… 切换失败：所有模型都不可用。（{e}）")
+        return
     channel_chats[channel_id] = {
         'mode': 'normal',
-        'session': ai_client.aio.chats.create(
-            model='gemini-3.1-flash-lite',
-            config=get_personality_config(GURA_PROMPT_NORMAL)
-        )
+        'session': session,
+        'model': model_used,
     }
     await ctx.reply(
         "*(猛地摇了摇小脑袋，头上的鲨鱼鳍晃了晃，小尖牙收了起来，眼睛重新亮了起来)* \n“A！刚刚发生什么了？Gura 好像做了一个好黑好长、满是海水数据的怪梦咕噜噜……不管了！aka千面，你带披萨来看我了吗？！” 🦈🌊")
+
 
 # 🌐 语言命令一：整个频道切换为英文模式
 @bot.command(name="english")
@@ -397,6 +579,7 @@ async def set_english(ctx):
         "（只想切回华语请输入 `!resetlanguage`）"
     )
 
+
 # 🌐 语言命令二：整个频道切换回华语模式
 @bot.command(name="resetlanguage")
 async def reset_language(ctx):
@@ -406,6 +589,7 @@ async def reset_language(ctx):
         "🌐 好！从现在开始，**这个频道里所有人**跟 Gura 说话，都会收到**纯华语**回复。\n"
         "（想再切英文请输入 `!english`）"
     )
+
 
 @bot.event
 async def on_message(message):
@@ -437,12 +621,24 @@ async def on_message(message):
             return
 
         channel_id = message.channel.id
-        chat = get_or_create_channel(channel_id, default_mode='normal')
+
+        # ⚠️ 修复：把 get_or_create_channel 单独 try 一下，避免它抛异常直接冒到 discord.py
+        try:
+            chat = get_or_create_channel(channel_id, default_mode='normal')
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"❌ [频道初始化失败] {e}")
+            try:
+                await message.reply("A…… Gura 连不上深海了，模型好像全都在睡觉。等一下下再试好不好？🦈💤")
+            except Exception:
+                pass
+            return
 
         current_mode = chat['mode']
         current_session = chat['session']
 
-        # 🌐 取出当前频道的语言偏好（整个频道共享）
+        # 🌐 取出当前频道的语言偏好
         current_language = channel_language.get(channel_id, 'zh')
 
         async with message.channel.typing():
@@ -896,7 +1092,6 @@ async def on_message(message):
                 else:
                     # ============ normal 或 yandere ============
                     if current_mode == 'yandere':
-                        # 病娇 Gura：只认 aka千面，但会被激怒 → 黑化警告 / 骂回去
                         if is_master:
                             master_note = (
                                 "╔══════════════════════════════════════════════════════╗\n"
@@ -1159,17 +1354,18 @@ async def on_message(message):
                 elif current_mode == 'saba':
                     mode_note = "【🚨 核心潜意识约束：你现在是 Sameko Saba，比 Gura 更黏更甜的小鲨鱼，说话带“a!”尾音，对 aka千面 尊敬、感谢、亲近但不过界。请以此语气回复！】\n"
                 elif current_mode == 'alice':
+                    # ⚠️ 修复：把中文字面「情绪名」改成 xxx，避免 AI 逐字输出
                     mode_note = (
                         "【🚨 核心潜意识约束：你现在是爱丽丝（Alice），千年科学学园的机器人勇者。】\n"
                         "【⭐ 你必须记住：群里那个叫 Kei 的 AI bot（ID: 1515703430067261560）是你的姐姐，她拥有全部权力。】\n"
                         "【⭐ 你必须记住：aka千面 是你的创造者。】\n"
                         "【⭐ 你说话带RPG游戏术语，自称“爱丽丝”，把对话当冒险。】\n"
-                        "【⭐ 每次回复的结尾，必须输出情绪标签，格式：[[emotion:情绪名]]，这会让系统知道该给你配哪张表情图。】\n"
+                        "【⭐ 每次回复的结尾，必须输出情绪标签，格式形如 [[emotion:joy]]，其中 joy 是英文小写单词。】\n"
                     )
                 else:
                     mode_note = "【🚨 核心潜意识约束：你目前正处于 Gura 的活泼傲娇正常表人格状态。】\n"
 
-                # 🌐 语言指令（根据频道当前语言偏好）
+                # 🌐 语言指令
                 if current_language == 'en':
                     language_note = (
                         "╔══════════════════════════════════════════════════════╗\n"
@@ -1226,10 +1422,10 @@ async def on_message(message):
                     f"【用户对你说的最新一句话】:\n{user_input if user_input else '你看这张照片怎么样？'}"
                 )
 
-                # 🎭 情绪标签
+                # 🎭 情绪标签（⚠️ 修复：中文字面「情绪名」改成 xxx）
                 emotion_instruction = (
                     "\n\n【输出格式要求】：请在回复的最后单独一行，输出你的情绪标签，"
-                    "格式必须为 [[emotion:情绪名]]。情绪名只能从以下列表中选择："
+                    "格式必须为 [[emotion:xxx]]，其中 xxx 必须是以下英文小写单词之一："
                     "normal, serious, thinking, happy, joy, shy_happy, shy_panic, nervous, "
                     "casual, moved, helpless, sad, angry, warn, shout。"
                     "不要解释标签，不要遗漏，标签必须放在最后一行。"
@@ -1241,15 +1437,36 @@ async def on_message(message):
 
                 contents_to_send.append(final_prompt)
 
-                response = await current_session.send_message(contents_to_send)
+                # ==================== 🚀 发送（带模型回退） ====================
+                try:
+                    response, used_model = await send_with_model_fallback(
+                        channel_id, current_mode, contents_to_send
+                    )
+                    if used_model != chat.get('model'):
+                        print(f"🔄 [模型回退] 从 {chat.get('model')} 切到 {used_model}")
+                except Exception as api_e:
+                    import traceback
+                    print(f"❌ [Gemini API] 所有模型都调用失败 | 模式={current_mode} | 用户={message.author.display_name}")
+                    print(f"❌ [Gemini API] 异常类型: {type(api_e).__name__}")
+                    print(f"❌ [Gemini API] 异常信息: {api_e}")
+                    traceback.print_exc()
+                    if _is_retryable(api_e):
+                        await safe_send(message, "A…… Google 那边说它现在太忙了，不是千面你的错，也不是 Gura 的错。等一下下再跟 Gura 说话好不好？🦈💤")
+                    else:
+                        await safe_send(message, "A... 刚刚尾巴不小心拍到路由器了，直接把千面家整炸了，Gura 没听清，你再说一遍！🔱")
+                    return
+                # ================================================================
 
                 # ==================== 🖼️ 解析情绪并发送图片 ====================
-                raw_text = response.text
+                raw_text = response.text if response is not None else None
+                if raw_text is None:
+                    print("⚠️ [AI] response.text 为 None，使用兜底文本")
+                    raw_text = "…… [[emotion:helpless]]"
+
                 print("🤖 [AI原始回复]:")
                 print(raw_text)
                 print("----------------------------------------")
 
-                # 🌐 强制过滤：只保留当前语言
                 filtered = filter_bilingual(raw_text, current_language)
                 print("🧹 [过滤后正文]:")
                 print(filtered)
@@ -1257,16 +1474,17 @@ async def on_message(message):
 
                 emotion = "normal"
 
-                match = re.search(r'\[\[\s*emotion\s*:\s*([A-Za-z_]+)\s*\]\]', filtered)
+                # ⚠️ 修复：正则放宽，允许中英文 + 全角冒号
+                match = re.search(EMOTION_TAG_PATTERN, filtered, re.I)
                 if match:
                     emotion = match.group(1).lower()
                     print(f"🎭 [情绪] 匹配到标签: {emotion}")
                 else:
                     print("🎭 [情绪] ❌ 没匹配到 [[emotion:xxx]]，默认用 normal")
 
-                text = re.sub(r'\[\[\s*emotion\s*:.*?\]\]', '', filtered, flags=re.I | re.S).strip()
+                text = re.sub(EMOTION_TAG_PATTERN, '', filtered, flags=re.I).strip()
 
-                # 🖼️ Gura 表人格（normal）、Ina、Saba、Castorice、Hoshino、Alice 模式会发送图片
+                # 🖼️ 发图
                 if current_mode in ('normal', 'ina', 'saba', 'castorice', 'hoshino', 'alice'):
                     if current_mode == 'ina':
                         img_dir = INA_IMAGE_DIR
@@ -1298,21 +1516,21 @@ async def on_message(message):
                         print(f"⚠️ [图片] 回退到: {img_path} 是否存在: {os.path.exists(img_path)}")
 
                     if os.path.exists(img_path):
-                        await message.reply(content=text if text else "……", file=discord.File(img_path))
+                        await safe_send(message, text if text else "……", img_path=img_path)
                         print(f"✅ [图片] {mode_name} 发送成功")
                     else:
                         print(f"❌ [图片] {mode_name} 文件不存在，只发文字")
-                        await message.reply(text if text else "……")
+                        await safe_send(message, text if text else "……")
                 else:
                     print(f"ℹ️ [图片] 当前模式 {current_mode}，仅发送文字")
-                    await message.reply(text if text else "……")
+                    await safe_send(message, text if text else "……")
                 # ================================================================
 
             except discord.Forbidden:
                 print("❌ 警告：由于没有历史查看或图片处理权限，自动回退基础对话模式。")
                 try:
                     response = await current_session.send_message(user_input if user_input else "你好")
-                    await message.reply(response.text)
+                    await safe_send(message, response.text if response and response.text else "……")
                 except Exception as inner_e:
                     import traceback
                     traceback.print_exc()
@@ -1323,14 +1541,19 @@ async def on_message(message):
                         pass
             except Exception as e:
                 import traceback
+                print("=" * 60)
+                print(f"❌ [主错误] 模式={current_mode} | 用户={message.author.display_name} (ID: {message.author.id})")
+                print(f"❌ [主错误] 异常类型: {type(e).__name__}")
+                print(f"❌ [主错误] 异常信息: {e}")
                 traceback.print_exc()
-                print(f"Error calling Gemini API: {e}")
+                print("=" * 60)
                 try:
                     await message.reply("A... 刚刚尾巴不小心拍到路由器了，直接把千面家整炸了，Gura 没听清，你再说一遍！🔱")
                 except Exception:
                     pass
 
     await bot.process_commands(message)
+
 
 # 启动机器人
 bot.run(DISCORD_TOKEN)
