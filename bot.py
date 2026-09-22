@@ -43,6 +43,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_DIR = os.path.join(BASE_DIR, "gura_images")
 INA_IMAGE_DIR = os.path.join(BASE_DIR, "ina_images")
 SABA_IMAGE_DIR = os.path.join(BASE_DIR, "saba_images")
+CASTORICE_IMAGE_DIR = os.path.join(BASE_DIR, "castorice_images")
 
 print(f"🖼️ [启动自检] Gura 图片目录: {IMAGE_DIR}")
 print(f"🖼️ [启动自检] Gura 目录存在: {os.path.exists(IMAGE_DIR)}")
@@ -53,6 +54,9 @@ print(f"🖼️ [启动自检] Ina normal.jpg 存在: {os.path.exists(os.path.jo
 print(f"🖼️ [启动自检] Saba 图片目录: {SABA_IMAGE_DIR}")
 print(f"🖼️ [启动自检] Saba 目录存在: {os.path.exists(SABA_IMAGE_DIR)}")
 print(f"🖼️ [启动自检] Saba normal.jpg 存在: {os.path.exists(os.path.join(SABA_IMAGE_DIR, 'normal.jpg'))}")
+print(f"🖼️ [启动自检] Castorice 图片目录: {CASTORICE_IMAGE_DIR}")
+print(f"🖼️ [启动自检] Castorice 目录存在: {os.path.exists(CASTORICE_IMAGE_DIR)}")
+print(f"🖼️ [启动自检] Castorice normal.jpg 存在: {os.path.exists(os.path.join(CASTORICE_IMAGE_DIR, 'normal.jpg'))}")
 
 EMOTION_FILE = {
     "normal": "normal.jpg",
@@ -248,7 +252,7 @@ async def on_ready():
     print(f"👑 认主 ID（aka千面）: {AKA_MASTER_ID} — 创作者 & 投喂者")
     print(f"🌟 特殊身份（天童ixo）: {TENDO_IXO_ID} (kei 的创作者)")
     print(f"📢 人格 / 语言切换都按【整个频道/群】生效。")
-    print(f"🖼️ 发图规则：Gura 表人格（normal）、Ina 模式、Saba 模式会发送图片。")
+    print(f"🖼️ 发图规则：Gura 表人格（normal）、Ina、Saba、Castorice 模式会发送图片。")
     print(f"🌐 语言过滤：AI 输出双语时，只保留当前语言，绝不发两条。")
     print(f"🧹 频道缓存上限: {MAX_CHANNEL_CHATS}")
     print("----------------------------------------")
@@ -1092,14 +1096,17 @@ async def on_message(message):
 
                 text = re.sub(r'\[\[\s*emotion\s*:.*?\]\]', '', filtered, flags=re.I | re.S).strip()
 
-                # 🖼️ Gura 表人格（normal）、Ina 模式、Saba 模式会发送图片
-                if current_mode in ('normal', 'ina', 'saba'):
+                # 🖼️ Gura 表人格（normal）、Ina、Saba、Castorice 模式会发送图片
+                if current_mode in ('normal', 'ina', 'saba', 'castorice'):
                     if current_mode == 'ina':
                         img_dir = INA_IMAGE_DIR
                         mode_name = "Ina"
                     elif current_mode == 'saba':
                         img_dir = SABA_IMAGE_DIR
                         mode_name = "Saba"
+                    elif current_mode == 'castorice':
+                        img_dir = CASTORICE_IMAGE_DIR
+                        mode_name = "Castorice"
                     else:
                         img_dir = IMAGE_DIR
                         mode_name = "Gura"
