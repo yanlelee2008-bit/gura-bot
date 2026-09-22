@@ -27,7 +27,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {gura}")
+    print(f"Logged in as {bot.user}") # 改为 bot.user
+    print(f"Bot ID: {bot.user.id}")
 
 # 这里放你原来的命令和事件
 # @bot.command()
@@ -35,4 +36,4 @@ async def on_ready():
 #     await ctx.send("pong")
 
 # ==== 3. 启动 bot ====
-bot.run(os.environ["MTU1MDE4MDI5ODM2NzQ0MzA2NQ.G-2BLq.j_jS5akzrU8RmIBl7tyloiqRR4g1pnvPAcqnSY"])
+bot.run(os.environ["MTU1MDE4MDI5ODM2NzQ0MzA2NQ.GOj6k0.4OgrQ1TzjMp3tfPw6PIJ27FwgCkYxXB1glP3uA"])
