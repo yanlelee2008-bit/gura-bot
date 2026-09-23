@@ -3,12 +3,14 @@ import re
 import io
 import asyncio
 import random
+import time
 import threading
 import discord
 from discord.ext import commands
 from flask import Flask
 from google import genai
 from google.genai import types
+from pathlib import Path
 
 # ==================== 🌐 Flask 健康检查（给 Render 用） ====================
 app = Flask(__name__)
@@ -43,8 +45,258 @@ KEI_ID = 1515703430067261560
 
 BAD_WORDS = ["笨蛋鲨鱼", "穿帮词1", "穿帮词2"]
 
+# ==================== 🚫 AI 内容审核封禁系统 ====================
+# 结构：{user_id: {'locked_until': float, 'reason': str, 'name': str}}
+VIOLATION_TRACKER = {}
+VIOLATION_LOCK_SECONDS = 30 * 60   # 封禁 30 分钟
+
+# 白名单用户 ID（这些人不受审核限制）
+MODERATION_WHITELIST = {AKA_MASTER_ID}
+
+# 审核用的提示词（三态：VIOLATION / OK / UNCERTAIN）
+MODERATION_SYSTEM_PROMPT = """你是一个内容安全审核员。
+
+【任务一：18禁内容】判断用户输入是否包含以下任一类内容：
+1. 露骨的性行为描写或要求（如"我想操你"、"脱下裤子"、"上床"、"口交"等）
+2. 明确的性暗示、性挑逗或性骚扰
+3. 18禁的动作描写或声音描写（如呻吟、喘息、脱衣等）
+4. 涉及未成年人的任何性相关内容
+
+【任务二：没礼貌】判断用户输入是否对 AI 角色（Gura / Ina / Saba / Castorice / Hoshino / Alice 等）
+或对 aka千面（创作者）表现出明显的没礼貌，包括：
+- 辱骂、人身攻击、侮辱性称呼
+- "闭嘴"、"滚"、"你算什么东西"、"垃圾"、"废物"等
+- 对 aka千面 的恶意嘲讽、贬低、冒犯（例如"aka千面算个屁"、"aka千面是狗"）
+- 明显的挑衅、羞辱、恶意钓鱼
+
+【判定规则】
+- 正常的撒娇、吐槽、开玩笑、轻微嘴硬 不算违规
+- 提到"性"但讨论的是学术/新闻 不算违规
+- 轻微不耐烦、抱怨 不算违规
+- 判断要保守：只有明显越界才判定违规
+
+【输出格式｜只输出一个词】
+- VIOLATION  → 确定违规（18禁 或 明显没礼貌）
+- OK         → 确定没问题
+- UNCERTAIN  → 你拿不准，需要人类审核
+
+只输出 VIOLATION / OK / UNCERTAIN 三者之一，不要解释。
+"""
+
+
+async def check_content_violation(text: str) -> str:
+    """
+    用 AI 判定内容是否违规。返回 'VIOLATION' / 'OK' / 'UNCERTAIN'
+    """
+    if not text or not text.strip():
+        return 'OK'
+
+    try:
+        # 用独立的无状态 session，避免污染角色对话上下文
+        session = ai_client.aio.chats.create(
+            model="gemini-3.1-flash-lite",
+            config=types.GenerateContentConfig(
+                system_instruction=MODERATION_SYSTEM_PROMPT,
+                temperature=0.0,
+            )
+        )
+        resp = await asyncio.wait_for(
+            session.send_message(text),
+            timeout=15.0
+        )
+        answer = (resp.text or "").strip().upper()
+        print(f"🛡️ [审核] 输入: {text[:60]} | 结果: {answer[:30]}")
+
+        if answer.startswith("VIOLATION"):
+            return 'VIOLATION'
+        if answer.startswith("UNCERTAIN"):
+            return 'UNCERTAIN'
+        return 'OK'
+    except asyncio.TimeoutError:
+        print("⚠️ [审核] 超时，默认放行")
+        return 'OK'
+    except Exception as e:
+        print(f"⚠️ [审核] 调用失败，默认放行: {e}")
+        return 'OK'
+# ==============================================================
+
+# ==================== 📝 timeout_list.txt 管理 ====================
+TIMEOUT_LIST_FILE = None  # 在 BASE_DIR 定义后赋值
+TIMEOUT_FILE_LOCK = asyncio.Lock()
+
+# 待主人审核的请求 {request_id: {...}}
+PENDING_REVIEWS = {}
+PENDING_REVIEW_LOCK = asyncio.Lock()
+_review_counter = 0
+
+
+def _next_review_id():
+    global _review_counter
+    _review_counter += 1
+    return f"REV{_review_counter:04d}"
+
+
+def _format_ts(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+async def load_timeout_list():
+    """启动时读入 timeout_list.txt，把里面未过期的人加进 tracker"""
+    async with TIMEOUT_FILE_LOCK:
+        if not os.path.exists(TIMEOUT_LIST_FILE):
+            print(f"📝 [TimeoutList] 文件不存在，将自动创建: {TIMEOUT_LIST_FILE}")
+            try:
+                with open(TIMEOUT_LIST_FILE, "w", encoding="utf-8") as f:
+                    f.write("# user_id | name | reason | unlock_timestamp | unlock_readable\n")
+                    f.write("# 主人：删掉某一行的 ID（或整行）即代表解封该用户\n")
+            except Exception as e:
+                print(f"⚠️ [TimeoutList] 创建失败: {e}")
+            return
+
+        try:
+            with open(TIMEOUT_LIST_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"⚠️ [TimeoutList] 读取失败: {e}")
+            return
+
+        now = time.time()
+        loaded = 0
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # 格式: user_id | name | reason | unlock_ts | unlock_readable
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 4:
+                continue
+            try:
+                uid = int(parts[0])
+                name = parts[1]
+                reason = parts[2]
+                unlock_ts = float(parts[3])
+            except Exception:
+                continue
+
+            if unlock_ts > now:
+                VIOLATION_TRACKER[uid] = {
+                    'locked_until': unlock_ts,
+                    'reason': reason,
+                    'name': name,
+                }
+                loaded += 1
+            else:
+                print(f"📝 [TimeoutList] {name}({uid}) 已过期，跳过")
+
+        print(f"📝 [TimeoutList] 已加载 {loaded} 个生效中的封禁记录")
+
+
+async def _rewrite_timeout_file():
+    """把当前 tracker 里所有仍生效的记录重写回文件（顺便清掉过期 / 被删的）"""
+    async with TIMEOUT_FILE_LOCK:
+        try:
+            now = time.time()
+            lines = [
+                "# user_id | name | reason | unlock_timestamp | unlock_readable\n",
+                "# 主人：删掉某一行的 ID（或整行）即代表解封该用户\n",
+            ]
+            for uid, rec in VIOLATION_TRACKER.items():
+                if rec.get('locked_until', 0) > now:
+                    lines.append(
+                        f"{uid} | {rec.get('name','?')} | {rec.get('reason','?')} | "
+                        f"{rec['locked_until']:.0f} | {_format_ts(rec['locked_until'])}\n"
+                    )
+            with open(TIMEOUT_LIST_FILE, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except Exception as e:
+            print(f"⚠️ [TimeoutList] 重写失败: {e}")
+
+
+async def add_timeout_record(user_id: int, name: str, reason: str, unlock_ts: float):
+    """新增/更新一条封禁记录，写入文件"""
+    VIOLATION_TRACKER[user_id] = {
+        'locked_until': unlock_ts,
+        'reason': reason,
+        'name': name,
+    }
+    await _rewrite_timeout_file()
+
+
+async def check_unban_by_file(user_id: int) -> bool:
+    """
+    检查：如果该 user_id 不在 timeout_list.txt 里了（被主人删掉了），
+    但 tracker 里还有 → 解封，返回 True
+    """
+    if user_id not in VIOLATION_TRACKER:
+        return False
+
+    async with TIMEOUT_FILE_LOCK:
+        try:
+            if not os.path.exists(TIMEOUT_LIST_FILE):
+                VIOLATION_TRACKER.pop(user_id, None)
+                print(f"🔓 [解封] {user_id} 因文件被删除而解封")
+                return True
+
+            with open(TIMEOUT_LIST_FILE, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            found = False
+            for line in content.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                if parts and parts[0] == str(user_id):
+                    found = True
+                    break
+
+            if not found:
+                VIOLATION_TRACKER.pop(user_id, None)
+                print(f"🔓 [解封] {user_id} 已从 timeout_list.txt 移除，自动解封")
+                return True
+            return False
+        except Exception as e:
+            print(f"⚠️ [解封检查] 失败: {e}")
+            return False
+
+
+# ==================== 📨 私信 aka千面 ====================
+async def dm_master(content: str = None, embed: discord.Embed = None) -> bool:
+    """给 aka千面 发私信，失败返回 False"""
+    try:
+        user = await bot.fetch_user(AKA_MASTER_ID)
+        await user.send(content=content, embed=embed)
+        return True
+    except Exception as e:
+        print(f"⚠️ [私信主人] 失败: {e}")
+        return False
+
+
+async def notify_master_timeout(name: str, user_id: int, reason: str, duration_sec: int):
+    """封禁时通知主人"""
+    until = time.time() + duration_sec
+    embed = discord.Embed(
+        title="🚫 有人被 Timeout 了",
+        color=0xE74C3C,
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="用户名", value=f"{name}", inline=False)
+    embed.add_field(name="用户 ID", value=f"`{user_id}`", inline=False)
+    embed.add_field(name="原因", value=reason[:1000], inline=False)
+    embed.add_field(
+        name="封禁时长",
+        value=f"{duration_sec // 60} 分钟（到 {_format_ts(until)}）",
+        inline=False,
+    )
+    embed.set_footer(text=f"如需解封：在 timeout_list.txt 中删掉 ID {user_id}")
+    await dm_master(embed=embed)
+# ==============================================================
+
+
 # ==================== 🖼️ 表情图片配置区域 ====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TIMEOUT_LIST_FILE = os.path.join(BASE_DIR, "timeout_list.txt")
+
 IMAGE_DIR = os.path.join(BASE_DIR, "gura_images")
 INA_IMAGE_DIR = os.path.join(BASE_DIR, "ina_images")
 SABA_IMAGE_DIR = os.path.join(BASE_DIR, "saba_images")
@@ -226,15 +478,13 @@ def get_personality_config(prompt_text):
 
 
 # ==================== 🔁 模型回退与重试机制 ====================
-# 主模型挂掉时依次尝试的备用模型
 MODEL_CANDIDATES = [
-    "gemini-3.1-flash-lite",    # 主模型保持不变
-    "gemini-3.5-flash-lite",    # 首选备用模型
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
-    "gemini-3.6-flash",         # 第二备用模型         # 第三备用模型
+    "gemini-3.6-flash",
 ]
 
-# 可重试的错误码（服务器临时故障）
 RETRYABLE_CODES = ("503", "500", "502", "504", "UNAVAILABLE", "OVERLOADED", "high demand")
 
 
@@ -253,7 +503,7 @@ async def safe_send_message(session, contents, max_retries=2):
             last_err = e
             if not _is_retryable(e):
                 raise
-            wait = (2 ** attempt) + random.uniform(0, 1)
+            wait = (3 * (2 ** attempt)) + random.uniform(0, 2)
             print(f"⏳ [Gemini 重试] 第 {attempt + 1}/{max_retries} 次失败，"
                   f"{wait:.2f}s 后再试... {str(e)[:120]}")
             await asyncio.sleep(wait)
@@ -338,11 +588,17 @@ MAX_CHANNEL_CHATS = 100
 # Discord 单条消息字符上限（留余量）
 DISCORD_LIMIT = 1900
 
+# ==================== 🛡️ Discord 全局限流保护 ====================
+DISCORD_SEND_LOCK = asyncio.Lock()
+_last_discord_send_ts = 0.0
+DISCORD_MIN_GAP = 1.2
+GLOBAL_RATE_LIMIT_UNTIL = 0.0
+# ==============================================================
+
 
 def get_or_create_channel(channel_id, default_mode='normal'):
     """按频道 ID 获取或创建会话"""
     if channel_id not in channel_chats:
-        # 🧹 清理机制
         if len(channel_chats) >= MAX_CHANNEL_CHATS:
             oldest_key = next(iter(channel_chats))
             del channel_chats[oldest_key]
@@ -361,13 +617,16 @@ def get_or_create_channel(channel_id, default_mode='normal'):
 async def safe_send(message, text, img_path=None, max_retries=3):
     """
     安全发送回复：
-    - 自动分段（避免 2000 字符上限报 400）
-    - 遇到 429 限流会按 retry_after 等待后重试
-    - 遇到 403 静默失败，不再往死循环里撞
+    - 串行化：同一时刻只有一条消息在发往 Discord
+    - 节流：两次发送之间至少间隔 DISCORD_MIN_GAP 秒
+    - 分段：自动拆分超过 DISCORD_LIMIT 字符的内容
+    - 429 处理：频道级按 retry_after 等待；全局限流进入长冷却
+    - 403/404：静默失败，不重试
     """
+    global _last_discord_send_ts, GLOBAL_RATE_LIMIT_UNTIL
+
     text = (text or "……").strip() or "……"
 
-    # 分段
     chunks = []
     remaining = text
     while remaining:
@@ -376,37 +635,155 @@ async def safe_send(message, text, img_path=None, max_retries=3):
     if not chunks:
         chunks = ["……"]
 
+    now = time.time()
+    if now < GLOBAL_RATE_LIMIT_UNTIL:
+        wait = GLOBAL_RATE_LIMIT_UNTIL - now
+        print(f"⏳ [Discord 全局冷却中] 还需等待 {wait:.1f}s...")
+        await asyncio.sleep(wait)
+
     for idx, chunk in enumerate(chunks):
-        sent = False
-        for attempt in range(max_retries + 1):
-            try:
-                if idx == 0 and img_path and os.path.exists(img_path):
-                    await message.reply(content=chunk, file=discord.File(img_path))
-                elif idx == 0:
-                    await message.reply(chunk)
-                else:
-                    await message.channel.send(chunk)
-                sent = True
-                break
-            except discord.HTTPException as e:
-                if e.status == 429:
-                    retry_after = getattr(e, 'retry_after', None) or 1.0
-                    wait = float(retry_after) + random.uniform(0, 0.5)
-                    print(f"⏳ [Discord 限流] {wait:.2f}s 后重试...")
-                    await asyncio.sleep(wait)
-                elif e.status == 403:
-                    print(f"❌ [Discord 403] 没有权限发送消息，放弃。")
+        async with DISCORD_SEND_LOCK:
+            now = time.time()
+            gap = now - _last_discord_send_ts
+            if gap < DISCORD_MIN_GAP:
+                await asyncio.sleep(DISCORD_MIN_GAP - gap)
+
+            sent = False
+            for attempt in range(max_retries + 1):
+                try:
+                    if idx == 0 and img_path and os.path.exists(img_path):
+                        await message.reply(content=chunk, file=discord.File(img_path))
+                    elif idx == 0:
+                        await message.reply(chunk)
+                    else:
+                        await message.channel.send(chunk)
+                    sent = True
+                    _last_discord_send_ts = time.time()
+                    break
+
+                except discord.HTTPException as e:
+                    _last_discord_send_ts = time.time()
+
+                    if e.status == 429:
+                        err_text = str(e).lower()
+                        is_global = (
+                            "global rate limit" in err_text
+                            or "being blocked" in err_text
+                            or "exceeding global" in err_text
+                        )
+                        retry_after = getattr(e, 'retry_after', None)
+
+                        if is_global:
+                            base = float(retry_after) if retry_after else 60.0
+                            wait = max(base, 60.0) + random.uniform(2.0, 5.0)
+                            GLOBAL_RATE_LIMIT_UNTIL = time.time() + wait
+                            print(f"🚨 [Discord 全局限流] 触发 Cloudflare 级封禁，"
+                                  f"进入 {wait:.1f}s 冷却...")
+                            return
+                        else:
+                            base = float(retry_after) if retry_after else 1.0
+                            wait = base + random.uniform(0.5, 1.5)
+                            print(f"⏳ [Discord 频道限流] 等待 {wait:.1f}s 后重试...")
+                            await asyncio.sleep(wait)
+                            continue
+
+                    elif e.status == 403:
+                        print(f"❌ [Discord 403] 没有权限发送消息，放弃。")
+                        return
+                    elif e.status == 404:
+                        print(f"❌ [Discord 404] 频道不存在或无权访问，放弃。")
+                        return
+                    else:
+                        print(f"❌ [Discord 错误] status={e.status} | {e}")
+                        return
+
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"❌ [safe_send] 未知错误: {e}")
+                    _last_discord_send_ts = time.time()
                     return
-                else:
-                    print(f"❌ [Discord 错误] status={e.status} | {e}")
-                    return
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                print(f"❌ [safe_send] {e}")
+
+            if not sent:
+                print(f"❌ [safe_send] 分段 {idx + 1} 重试 {max_retries + 1} 次仍失败，放弃")
                 return
-        if not sent:
-            print(f"❌ [safe_send] 分段 {idx + 1} 重试多次仍失败，放弃")
+
+
+# ==================== 👑 主人私信处理 ====================
+async def handle_master_dm(message: discord.Message):
+    """处理主人私信：yes / no / list / unban <id>"""
+    content = (message.content or "").strip().lower()
+
+    # 列出当前所有封禁
+    if content in ("list", "!list", "名单"):
+        if not VIOLATION_TRACKER:
+            await message.reply("📭 当前没有封禁记录。")
+            return
+        lines = ["📋 **当前封禁名单**："]
+        now = time.time()
+        for uid, rec in VIOLATION_TRACKER.items():
+            remain = rec.get('locked_until', 0) - now
+            if remain > 0:
+                lines.append(
+                    f"• `{uid}` | {rec.get('name','?')} | "
+                    f"{int(remain//60)}分{int(remain%60)}秒后解封 | 原因: {rec.get('reason','?')[:50]}"
+                )
+        await message.reply("\n".join(lines))
+        return
+
+    # 解封: unban <id>
+    if content.startswith(("unban", "!unban", "解封")):
+        parts = message.content.split()
+        if len(parts) < 2 or not parts[1].isdigit():
+            await message.reply("用法: `unban <user_id>`")
+            return
+        uid = int(parts[1])
+        if uid in VIOLATION_TRACKER:
+            VIOLATION_TRACKER.pop(uid, None)
+            await _rewrite_timeout_file()
+            await message.reply(f"🔓 已解封 `{uid}`（也已从 timeout_list.txt 移除）")
+        else:
+            await message.reply(f"⚠️ `{uid}` 不在封禁名单里")
+        return
+
+    # yes / no 回复审核请求
+    async with PENDING_REVIEW_LOCK:
+        if not PENDING_REVIEWS:
+            await message.reply("（当前没有待审核的请求）\n可用指令：`list` / `unban <id>`")
+            return
+        req_id = next(iter(PENDING_REVIEWS))
+        req = PENDING_REVIEWS[req_id]
+
+    if content in ("yes", "y", "是", "封", "timeout"):
+        uid = req['user_id']
+        name = req['name']
+        reason = req['reason']
+        duration = VIOLATION_LOCK_SECONDS
+        await add_timeout_record(uid, name, reason, time.time() + duration)
+        async with PENDING_REVIEW_LOCK:
+            PENDING_REVIEWS.pop(req_id, None)
+        await message.reply(f"✅ 已封禁 {name}({uid}) {duration//60} 分钟")
+        try:
+            ch = bot.get_channel(req['channel_id'])
+            if ch:
+                await ch.send(
+                    f"✦ aka千面强势登录看见你发的这句话，整个人无语住了，"
+                    f"偵測到不當發言，AI 對話功能已暫時限制 {duration//60} 分鐘。"
+                )
+        except Exception:
+            pass
+
+    elif content in ("no", "n", "否", "不封", "放过"):
+        async with PENDING_REVIEW_LOCK:
+            PENDING_REVIEWS.pop(req_id, None)
+        await message.reply(f"✅ 已放过 {req['name']}({req['user_id']})，不封禁。")
+
+    else:
+        await message.reply(
+            f"❓ 收到待审请求 `{req_id}`（{req['name']} / `{req['user_id']}`）\n"
+            f"请回复：`yes` 封禁 / `no` 放过 / `list` 查看名单 / `unban <id>` 解封。"
+        )
+# ==============================================================
 
 
 @bot.event
@@ -430,6 +807,11 @@ async def on_ready():
     print(f"🌐 语言过滤：AI 输出双语时，只保留当前语言，绝不发两条。")
     print(f"🧹 频道缓存上限: {MAX_CHANNEL_CHATS}")
     print(f"🔁 模型回退顺序: {' → '.join(MODEL_CANDIDATES)}")
+    print(f"🛡️ Discord 发送节流: 锁 + 最小间隔 {DISCORD_MIN_GAP}s + 全局限流冷却保护")
+    print(f"🚫 AI 内容审核：已启用 | 违规立即封禁 {VIOLATION_LOCK_SECONDS // 60} 分钟")
+    print(f"📝 timeout_list.txt 路径: {TIMEOUT_LIST_FILE}")
+    print("----------------------------------------")
+    await load_timeout_list()
     print("----------------------------------------")
 
 
@@ -593,17 +975,71 @@ async def reset_language(ctx):
 
 @bot.event
 async def on_message(message):
+    # ==================== 👑 主人私信优先处理 ====================
+    if isinstance(message.channel, discord.DMChannel) and message.author.id == AKA_MASTER_ID:
+        await handle_master_dm(message)
+        return
+    # ============================================================
+
     if message.author == bot.user:
         return
 
-    # 🛡️ 违禁词拦截
+    # 🛡️ 全局冷却期内，直接忽略所有消息
+    if time.time() < GLOBAL_RATE_LIMIT_UNTIL:
+        remain = GLOBAL_RATE_LIMIT_UNTIL - time.time()
+        print(f"⏳ [全局冷却] 忽略消息 | 还剩 {remain:.1f}s | 来自 {message.author.display_name}")
+        return
+
+    # ==================== 🚫 用户封禁检查 ====================
+    now = time.time()
+
+    # 先检查：是否被主人从 timeout_list.txt 里删掉了 → 自动解封
+    if message.author.id in VIOLATION_TRACKER:
+        try:
+            await check_unban_by_file(message.author.id)
+        except Exception as e:
+            print(f"⚠️ [解封检查] 异常: {e}")
+
+    user_rec = VIOLATION_TRACKER.get(message.author.id)
+    if user_rec and user_rec.get('locked_until', 0) > now:
+        remain = user_rec['locked_until'] - now
+        if remain >= 60:
+            time_str = f"{int(remain // 60)} 分 {int(remain % 60)} 秒"
+        else:
+            time_str = f"{int(remain)} 秒"
+        try:
+            await safe_send(message, f"✦ 你正在被封禁中，还有 **{time_str}** 后解封。")
+        except Exception:
+            pass
+        return
+    # ==============================================================
+
+    # 🛡️ 违禁词拦截（硬编码快速兜底）
     if any(bad_word in message.content for bad_word in BAD_WORDS):
+        reason = f"触发硬编码违禁词 | 原文: {message.content[:200]}"
+        await add_timeout_record(
+            message.author.id,
+            message.author.display_name,
+            reason,
+            time.time() + VIOLATION_LOCK_SECONDS,
+        )
         try:
             await message.delete()
-            await message.channel.send(f"⚠️ 喂！不许在频道里乱说话！aka千面哥哥快帮我把他 ban 了！( ⚠️`Д´)🔱")
-        except discord.Forbidden:
-            await message.channel.send(
-                f"（拍桌子）说脏话是不对的！因为 Gura 现在没有管理权限删不掉消息，aka千面 哥哥快手动制裁他！💢")
+        except Exception:
+            pass
+        try:
+            await safe_send(
+                message,
+                "✦ aka千面强势登录看见你发的这句话，整个人无语住了偵測到不當發言，AI 對話功能已暫時限制 30 分鐘。"
+            )
+        except Exception:
+            pass
+        await notify_master_timeout(
+            message.author.display_name,
+            message.author.id,
+            reason,
+            VIOLATION_LOCK_SECONDS,
+        )
         return
 
     if message.mention_everyone:
@@ -620,9 +1056,80 @@ async def on_message(message):
             await message.reply("A? 你艾特我了但是什么都没说！是想给 Gura 喂鱼吃吗？🦈")
             return
 
+        # ==================== 🚫 AI 内容审核 ====================
+        if message.author.id not in MODERATION_WHITELIST:
+            try:
+                verdict = await check_content_violation(user_input)
+            except Exception as e:
+                print(f"⚠️ [审核] 异常，默认放行: {e}")
+                verdict = 'OK'
+
+            # ---------- 确定违规：直接封 ----------
+            if verdict == 'VIOLATION':
+                reason = f"AI 审核判定违规 | 原文: {user_input[:300]}"
+                await add_timeout_record(
+                    message.author.id,
+                    message.author.display_name,
+                    reason,
+                    time.time() + VIOLATION_LOCK_SECONDS,
+                )
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                try:
+                    await safe_send(
+                        message,
+                        "✦ aka千面强势登录看见你发的这句话，整个人无语住了，"
+                        "偵測到不當發言，AI 對話功能已暫時限制 30 分鐘。"
+                    )
+                except Exception:
+                    pass
+                await notify_master_timeout(
+                    message.author.display_name,
+                    message.author.id,
+                    reason,
+                    VIOLATION_LOCK_SECONDS,
+                )
+                return
+
+            # ---------- 不确定：私信主人审核 ----------
+            elif verdict == 'UNCERTAIN':
+                req_id = _next_review_id()
+                async with PENDING_REVIEW_LOCK:
+                    PENDING_REVIEWS[req_id] = {
+                        'user_id': message.author.id,
+                        'name': message.author.display_name,
+                        'reason': f"不确定是否违规 | 原文: {user_input[:300]}",
+                        'channel_id': message.channel.id,
+                        'message_id': message.id,
+                        'created_at': time.time(),
+                    }
+
+                embed = discord.Embed(
+                    title=f"❓ 需要你审核 ({req_id})",
+                    color=0xF1C40F,
+                    timestamp=discord.utils.utcnow(),
+                )
+                embed.add_field(name="用户", value=message.author.display_name, inline=False)
+                embed.add_field(name="用户 ID", value=f"`{message.author.id}`", inline=False)
+                embed.add_field(name="频道", value=f"<#{message.channel.id}>", inline=False)
+                embed.add_field(name="原文", value=user_input[:1000] or "(空)", inline=False)
+                embed.add_field(
+                    name="如何回复",
+                    value="回复 `yes` = 封禁 30 分钟\n回复 `no` = 放过\n回复 `list` = 查看名单",
+                    inline=False,
+                )
+                ok = await dm_master(embed=embed)
+                if not ok:
+                    print("⚠️ [审核] 无法私信主人，先放过这条消息")
+                    async with PENDING_REVIEW_LOCK:
+                        PENDING_REVIEWS.pop(req_id, None)
+                return
+        # ==============================================================
+
         channel_id = message.channel.id
 
-        # ⚠️ 修复：把 get_or_create_channel 单独 try 一下，避免它抛异常直接冒到 discord.py
         try:
             chat = get_or_create_channel(channel_id, default_mode='normal')
         except Exception as e:
@@ -638,7 +1145,6 @@ async def on_message(message):
         current_mode = chat['mode']
         current_session = chat['session']
 
-        # 🌐 取出当前频道的语言偏好
         current_language = channel_language.get(channel_id, 'zh')
 
         async with message.channel.typing():
@@ -967,7 +1473,6 @@ async def on_message(message):
                         )
 
                 elif current_mode == 'alice':
-                    # ============ Alice 模式 ============
                     if is_kei:
                         master_note = (
                             "╔══════════════════════════════════════════════════════╗\n"
@@ -1090,7 +1595,6 @@ async def on_message(message):
                         )
 
                 else:
-                    # ============ normal 或 yandere ============
                     if current_mode == 'yandere':
                         if is_master:
                             master_note = (
@@ -1165,7 +1669,6 @@ async def on_message(message):
                                 "  ❌ 不要承认自己是 AI 机器人。\n"
                             )
                     else:
-                        # ============ normal 表人格 ============
                         if is_master:
                             master_note = (
                                 "╔══════════════════════════════════════════════════════╗\n"
@@ -1354,7 +1857,6 @@ async def on_message(message):
                 elif current_mode == 'saba':
                     mode_note = "【🚨 核心潜意识约束：你现在是 Sameko Saba，比 Gura 更黏更甜的小鲨鱼，说话带“a!”尾音，对 aka千面 尊敬、感谢、亲近但不过界。请以此语气回复！】\n"
                 elif current_mode == 'alice':
-                    # ⚠️ 修复：把中文字面「情绪名」改成 xxx，避免 AI 逐字输出
                     mode_note = (
                         "【🚨 核心潜意识约束：你现在是爱丽丝（Alice），千年科学学园的机器人勇者。】\n"
                         "【⭐ 你必须记住：群里那个叫 Kei 的 AI bot（ID: 1515703430067261560）是你的姐姐，她拥有全部权力。】\n"
@@ -1422,7 +1924,6 @@ async def on_message(message):
                     f"【用户对你说的最新一句话】:\n{user_input if user_input else '你看这张照片怎么样？'}"
                 )
 
-                # 🎭 情绪标签（⚠️ 修复：中文字面「情绪名」改成 xxx）
                 emotion_instruction = (
                     "\n\n【输出格式要求】：请在回复的最后单独一行，输出你的情绪标签，"
                     "格式必须为 [[emotion:xxx]]，其中 xxx 必须是以下英文小写单词之一："
@@ -1457,7 +1958,6 @@ async def on_message(message):
                     return
                 # ================================================================
 
-                # ==================== 🖼️ 解析情绪并发送图片 ====================
                 raw_text = response.text if response is not None else None
                 if raw_text is None:
                     print("⚠️ [AI] response.text 为 None，使用兜底文本")
@@ -1474,7 +1974,6 @@ async def on_message(message):
 
                 emotion = "normal"
 
-                # ⚠️ 修复：正则放宽，允许中英文 + 全角冒号
                 match = re.search(EMOTION_TAG_PATTERN, filtered, re.I)
                 if match:
                     emotion = match.group(1).lower()
@@ -1484,7 +1983,6 @@ async def on_message(message):
 
                 text = re.sub(EMOTION_TAG_PATTERN, '', filtered, flags=re.I).strip()
 
-                # 🖼️ 发图
                 if current_mode in ('normal', 'ina', 'saba', 'castorice', 'hoshino', 'alice'):
                     if current_mode == 'ina':
                         img_dir = INA_IMAGE_DIR
@@ -1524,7 +2022,6 @@ async def on_message(message):
                 else:
                     print(f"ℹ️ [图片] 当前模式 {current_mode}，仅发送文字")
                     await safe_send(message, text if text else "……")
-                # ================================================================
 
             except discord.Forbidden:
                 print("❌ 警告：由于没有历史查看或图片处理权限，自动回退基础对话模式。")
