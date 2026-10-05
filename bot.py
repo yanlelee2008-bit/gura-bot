@@ -1448,7 +1448,7 @@ YTDL_SEARCH_OPTIONS = {
     'extract_flat': True,
     'extractor_args': {
         'youtube': {
-            'player_client': ['tv', 'mweb'],
+            'player_client': ['mweb', 'tv', 'web_safari'],
             'po_token': ['bgutil:script'],
     }
 },
@@ -1465,7 +1465,7 @@ YTDL_STREAM_OPTIONS = {
     'source_address': '0.0.0.0',
     'extractor_args': {
         'youtube': {
-            'player_client': ['tv', 'mweb'],
+            'player_client': ['mweb', 'tv', 'web_safari'],
             'po_token': ['bgutil:script'],
     }
 },
