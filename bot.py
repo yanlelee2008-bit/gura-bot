@@ -1526,6 +1526,7 @@ def _get_stream_url(video_url: str, max_retries: int = 3):
         except Exception as e:
             last_err = e
             err_lower = str(e).lower()
+            # 针对临时性错误进行重试
             if ("the page needs to be reloaded" in err_lower
                     or "sign in to confirm" in err_lower
                     or "requested format is not available" in err_lower):
