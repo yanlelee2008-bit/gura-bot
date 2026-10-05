@@ -1529,16 +1529,13 @@ def _get_stream_url(video_url: str, max_retries: int = 3):
             last_err = e
             err_lower = str(e).lower()
             # 针对临时性错误进行重试
-            if ("the page needs to be reloaded" in err_lower
-                    or "sign in to confirm" in err_lower
-                    or "requested format is not available" in err_lower):
+            if "the page needs to be reloaded" in err_lower:
                 wait = 2 ** attempt
                 print(f"⚠️ [音乐] 遇到临时错误，{wait} 秒后重试（第 {attempt + 1}/{max_retries} 次）...")
                 time.sleep(wait)
                 continue
             raise
     raise last_err
-
 
 def _play_next(voice_client, guild_id):
     queue = music_queues.get(guild_id)
