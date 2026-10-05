@@ -1448,9 +1448,10 @@ YTDL_SEARCH_OPTIONS = {
     'extract_flat': True,
     'extractor_args': {
         'youtube': {
-            'player_client': ['web', 'mweb', 'web_safari'],
-        }
-    },
+            'player_client': ['tv', 'mweb'],
+            'po_token': ['bgutil:http:4416'],
+    }
+},
     'user_agent': _UA_MOBILE,
     'sleep_interval': 1,
     'max_sleep_interval': 3,
@@ -1464,9 +1465,10 @@ YTDL_STREAM_OPTIONS = {
     'source_address': '0.0.0.0',
     'extractor_args': {
         'youtube': {
-            'player_client': ['web', 'mweb', 'tv'],
-        }
-    },
+            'player_client': ['tv', 'mweb'],
+            'po_token': ['bgutil:http:4416'],
+    }
+},
     'user_agent': _UA_MOBILE,
     'sleep_interval': 1,
     'max_sleep_interval': 3,
