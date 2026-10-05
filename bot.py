@@ -1470,6 +1470,7 @@ YTDL_STREAM_OPTIONS = {
     'user_agent': _UA_MOBILE,
     'sleep_interval': 1,
     'max_sleep_interval': 3,
+    'remote_components': 'ejs:github',
 }
 
 if YT_COOKIES_PATH:
@@ -1515,10 +1516,25 @@ def _yt_search(query: str, limit: int = 20):
             return []
 
 
-def _get_stream_url(video_url: str):
-    with yt_dlp.YoutubeDL(YTDL_STREAM_OPTIONS) as ydl:
-        info = ydl.extract_info(video_url, download=False)
-        return info['url'], info.get('title', '未知歌曲')
+def _get_stream_url(video_url: str, max_retries: int = 3):
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            with yt_dlp.YoutubeDL(YTDL_STREAM_OPTIONS) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+                return info['url'], info.get('title', '未知歌曲')
+        except Exception as e:
+            last_err = e
+            err_lower = str(e).lower()
+            if ("the page needs to be reloaded" in err_lower
+                    or "sign in to confirm" in err_lower
+                    or "requested format is not available" in err_lower):
+                wait = 2 ** attempt
+                print(f"⚠️ [音乐] 遇到临时错误，{wait} 秒后重试（第 {attempt + 1}/{max_retries} 次）...")
+                time.sleep(wait)
+                continue
+            raise
+    raise last_err
 
 
 def _play_next(voice_client, guild_id):
