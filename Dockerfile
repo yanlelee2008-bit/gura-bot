@@ -20,5 +20,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 在后台启动 POT 服务，然后启动 bot
-CMD ["sh", "-c", "npx -y bgutil-ytdlp-pot-provider --port 4416 & sleep 5 && python bot.py"]
+# 在后台启动 POT 提供程序，然后启动 bot
+CMD ["sh", "-c", "node $(npm root -g)/bgutil-ytdlp-pot-provider/server/build/main.js --port 4416 & sleep 5 && python bot.py"]
