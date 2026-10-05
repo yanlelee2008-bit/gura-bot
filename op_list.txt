@@ -1,0 +1,2 @@
+# 格式: user_id | name | permissions
+1134715472965795841 | aka千面 | all
