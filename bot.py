@@ -6,6 +6,8 @@ import random
 import time
 import threading
 import collections
+import base64
+import tempfile
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -30,6 +32,27 @@ except ImportError:
     FFMPEG_EXE = None
     print("🎬 [FFmpeg] 未安装 imageio-ffmpeg，将使用系统 PATH 中的 ffmpeg")
 
+# ==================== 🍪 YouTube Cookies & 代理支持 ====================
+YT_COOKIES_PATH = None
+_yt_cookies_b64 = os.environ.get("YT_COOKIES_B64")
+if _yt_cookies_b64:
+    try:
+        _tmp = tempfile.NamedTemporaryFile(mode='wb', suffix='.txt', delete=False)
+        _tmp.write(base64.b64decode(_yt_cookies_b64))
+        _tmp.close()
+        YT_COOKIES_PATH = _tmp.name
+        print(f"🍪 [Cookies] YouTube Cookies 已加载")
+    except Exception as e:
+        print(f"⚠️ [Cookies] 加载失败: {e}")
+else:
+    print("🍪 [Cookies] 未提供 YT_COOKIES_B64，跳过")
+
+YTDLP_PROXY = os.environ.get("YTDLP_PROXY")
+if YTDLP_PROXY:
+    print(f"🌐 [代理] 已启用代理: {YTDLP_PROXY}")
+else:
+    print("🌐 [代理] 未配置代理")
+
 # ==================== 🌐 Flask 健康检查（给 Render 用） ====================
 app = Flask(__name__)
 
@@ -49,7 +72,7 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 # =========================================================================
 # ==================== 🛠️ 凭证与功能配置区域 ====================
-DISCORD_TOKEN = "MTU1MDE4MDI5ODM2NzQ0MzA2NQ.G6zHtQ.m1VT52lworDeP1fYPWKbTBkP__MoGeeXIdxN00"
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN") or "MTU1MDE4MDI5ODM2NzQ0MzA2NQ.G6zHtQ.m1VT52lworDeP1fYPWKbTBkP__MoGeeXIdxN00"
 
 # ==================== 🔑 多 API Key 池（顺序消耗制） ====================
 GEMINI_API_KEYS = [
@@ -1409,6 +1432,12 @@ now_playing = {}
 music_volumes = {}
 DEFAULT_VOLUME = 0.5
 
+# ---------- 反 bot 拦截的核心配置 ----------
+_UA_MOBILE = (
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
+    'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+)
+
 YTDL_SEARCH_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -1417,6 +1446,14 @@ YTDL_SEARCH_OPTIONS = {
     'default_search': 'auto',
     'source_address': '0.0.0.0',
     'extract_flat': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['mweb', 'web', 'android'],
+        }
+    },
+    'user_agent': _UA_MOBILE,
+    'sleep_interval': 1,
+    'max_sleep_interval': 3,
 }
 
 YTDL_STREAM_OPTIONS = {
@@ -1425,7 +1462,25 @@ YTDL_STREAM_OPTIONS = {
     'quiet': True,
     'no_warnings': True,
     'source_address': '0.0.0.0',
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['mweb', 'web', 'android'],
+        }
+    },
+    'user_agent': _UA_MOBILE,
+    'sleep_interval': 1,
+    'max_sleep_interval': 3,
 }
+
+if YT_COOKIES_PATH:
+    YTDL_SEARCH_OPTIONS['cookiefile'] = YT_COOKIES_PATH
+    YTDL_STREAM_OPTIONS['cookiefile'] = YT_COOKIES_PATH
+    print(f"🍪 [yt-dlp] 已挂载 cookiefile: {YT_COOKIES_PATH}")
+
+if YTDLP_PROXY:
+    YTDL_SEARCH_OPTIONS['proxy'] = YTDLP_PROXY
+    YTDL_STREAM_OPTIONS['proxy'] = YTDLP_PROXY
+    print(f"🌐 [yt-dlp] 已挂载 proxy: {YTDLP_PROXY}")
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
