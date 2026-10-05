@@ -35,9 +35,7 @@ urllib3==2.8.0
 websockets==16.1.1
 yarl==1.25.1
 PyNaCl
-yt-dlp
 imageio-ffmpeg
 davey
-PyNaCl
 bgutil-ytdlp-pot-provider
-yt-dlp>=2026.03.17
+git+https://github.com/yt-dlp/yt-dlp.git@master
