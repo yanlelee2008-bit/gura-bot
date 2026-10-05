@@ -1448,7 +1448,7 @@ YTDL_SEARCH_OPTIONS = {
     'extract_flat': True,
     'extractor_args': {
         'youtube': {
-            'player_client': ['web', 'mweb', 'tv'],
+            'player_client': ['web', 'mweb', 'web_safari'],
         }
     },
     'user_agent': _UA_MOBILE,
