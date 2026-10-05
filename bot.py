@@ -1449,7 +1449,7 @@ YTDL_SEARCH_OPTIONS = {
     'extractor_args': {
         'youtube': {
             'player_client': ['tv', 'mweb'],
-            'po_token': ['bgutil:http:4416'],
+            'po_token': ['bgutil:script'],
     }
 },
     'user_agent': _UA_MOBILE,
@@ -1466,7 +1466,7 @@ YTDL_STREAM_OPTIONS = {
     'extractor_args': {
         'youtube': {
             'player_client': ['tv', 'mweb'],
-            'po_token': ['bgutil:http:4416'],
+            'po_token': ['bgutil:script'],
     }
 },
     'user_agent': _UA_MOBILE,
