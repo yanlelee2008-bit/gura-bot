@@ -1439,7 +1439,7 @@ _UA_MOBILE = (
 )
 
 YTDL_SEARCH_OPTIONS = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio/best/best*',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
@@ -1448,7 +1448,7 @@ YTDL_SEARCH_OPTIONS = {
     'extract_flat': True,
     'extractor_args': {
         'youtube': {
-            'player_client': ['mweb', 'web', 'android'],
+            'player_client': ['web', 'mweb', 'tv'],
         }
     },
     'user_agent': _UA_MOBILE,
@@ -1457,14 +1457,14 @@ YTDL_SEARCH_OPTIONS = {
 }
 
 YTDL_STREAM_OPTIONS = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio/best/best*',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
     'source_address': '0.0.0.0',
     'extractor_args': {
         'youtube': {
-            'player_client': ['mweb', 'web', 'android'],
+            'player_client': ['web', 'mweb', 'tv'],
         }
     },
     'user_agent': _UA_MOBILE,
