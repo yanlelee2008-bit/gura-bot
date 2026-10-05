@@ -40,4 +40,4 @@ imageio-ffmpeg
 davey
 PyNaCl
 bgutil-ytdlp-pot-provider
-yt-dlp>=2025.05.22
+yt-dlp>=2026.03.17
