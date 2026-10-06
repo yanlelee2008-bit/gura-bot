@@ -1,20 +1,37 @@
-cookies.txt
-cookies_b64.txt
-*.cookies
-
-# Python
+# ==================== 🐍 Python ====================
 __pycache__/
 *.pyc
+*.pyo
 .venv/
 venv/
 .idea/
 
-# 运行时生成的文件
+# ==================== 🎵 Lavalink ====================
+lavalink/*.jar
+lavalink/bin/
+lavalink/lib/
+lavalink/conf/
+lavalink/include/
+lavalink/jmods/
+lavalink/legal/
+lavalink/NOTICE
+lavalink/release
+*.jar
+
+# ==================== 🎼 Sonata（旧方案，整个排除） ====================
+sonata/
+
+# ==================== 🔐 敏感文件 ====================
+cookies.txt
+cookies_b64.txt
+.env
+
+# ==================== 📝 运行时生成 ====================
 timeout_list.txt
 op_list.txt
 questionz.txt
 questiond.txt
 
-# 系统文件
+# ==================== 🖥️ 系统文件 ====================
 .DS_Store
 Thumbs.db
