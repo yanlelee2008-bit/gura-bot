@@ -1,4 +1,4 @@
-﻿Flask
+Flask
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3
 aiosignal==1.4.0
@@ -34,7 +34,5 @@ urllib3==2.8.0
 websockets==16.1.1
 yarl==1.25.1
 PyNaCl
-imageio-ffmpeg
 davey
-bgutil-ytdlp-pot-provider
-yt-dlp>=2026.03.17
+wavelink[voice]
