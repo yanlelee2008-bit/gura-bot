@@ -1386,9 +1386,6 @@ async def help_game_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-
-# ==================== 🎵 音乐播放系统（wavelink + Sonata 版） ====================
-
 # ==================== 🎵 音乐播放系统（wavelink + Sonata 版） ====================
 
 class SongSelectView(discord.ui.View):
@@ -1398,6 +1395,7 @@ class SongSelectView(discord.ui.View):
         self.player = player
         self.requester_id = requester_id
 
+        # 每行最多 5 个按钮，最多 2 行放歌曲（10 首）
         for i, track in enumerate(tracks):
             title = track.title
             short = title if len(title) <= 60 else title[:60] + "…"
@@ -1409,6 +1407,7 @@ class SongSelectView(discord.ui.View):
             btn.callback = self._make_callback(i)
             self.add_item(btn)
 
+        # 取消按钮放在第三行
         cancel = discord.ui.Button(
             label="❌ 取消",
             style=discord.ButtonStyle.danger,
@@ -1438,13 +1437,25 @@ class SongSelectView(discord.ui.View):
                     ephemeral=True,
                 )
                 return
+
             track = self.tracks[index]
-            await self.player.play(track)
-            await interaction.response.edit_message(
-                content=f"🎶 正在播放：**{track.title}**",
-                embed=None,
-                view=None,
-            )
+
+            # 如果当前没有歌曲在播放，就直接播放；否则加入队列
+            if self.player.current is not None:
+                await self.player.queue.put_wait(track)
+                await interaction.response.edit_message(
+                    content=f"➕ 已加入队列：**{track.title}**",
+                    embed=None,
+                    view=None,
+                )
+            else:
+                await self.player.play(track)
+                await interaction.response.edit_message(
+                    content=f"🎶 正在播放：**{track.title}**",
+                    embed=None,
+                    view=None,
+                )
+
             self.stop()
         return callback
 
@@ -1472,6 +1483,7 @@ async def play_cmd(interaction: discord.Interaction, query: str):
 
     await interaction.response.defer()
 
+    # 连接语音频道
     try:
         if interaction.guild.voice_client:
             player = interaction.guild.voice_client
@@ -1483,6 +1495,7 @@ async def play_cmd(interaction: discord.Interaction, query: str):
         await interaction.followup.send(f"❌ 无法连接语音频道：{e}")
         return
 
+    # 搜索
     try:
         results = await wavelink.Playable.search(query, source=wavelink.TrackSource.SoundCloud)
     except Exception as e:
@@ -1493,9 +1506,22 @@ async def play_cmd(interaction: discord.Interaction, query: str):
         await interaction.followup.send("❌ 搜索不到结果，换个关键词试试吧。")
         return
 
-    track = results.tracks[0] if isinstance(results, wavelink.Playlist) else results[0]
-    await player.play(track)
-    await interaction.followup.send(f"🎶 正在播放：**{track.title}**")
+    # 提取曲目列表
+    if isinstance(results, wavelink.Playlist):
+        tracks = results.tracks
+    else:
+        tracks = results
+
+    if not tracks:
+        await interaction.followup.send("❌ 搜索不到结果，换个关键词试试吧。")
+        return
+
+    # 取前 10 首
+    tracks = tracks[:10]
+    view = SongSelectView(tracks, player, interaction.user.id)
+    embed = view.build_embed()
+
+    await interaction.followup.send(embed=embed, view=view)
 
 
 @bot.tree.command(name="pause", description="暂停当前播放")
