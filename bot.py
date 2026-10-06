@@ -1672,6 +1672,25 @@ async def on_ready():
         print(f"⚠️ [Slash] 同步失败: {e}")
     print("----------------------------------------")
 
+# ==================== 🎵 Track End 监听：自动播放下一首 ====================
+@bot.event
+async def on_wavelink_track_end(payload):
+    try:
+        player = payload.player
+        if player is None:
+            return
+
+        # 队列里还有歌，就播下一首
+        if player.queue:
+            next_track = await player.queue.get_wait()
+            await player.play(next_track)
+            print(f"⏭️ [自动切歌] 正在播放下一首: {next_track.title}")
+        else:
+            print(f"⏹️ [自动切歌] 队列已空，停止播放")
+    except Exception as e:
+        print(f"⚠️ [自动切歌] 出错: {e}")
+# ======================================================================
+
 
 # 🔮 人格命令控制一：觉醒 Gura 里人格（病娇妹妹）（按频道）
 @bot.command(name="awaken")
