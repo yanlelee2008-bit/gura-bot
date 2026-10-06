@@ -356,6 +356,13 @@ CASTORICE_IMAGE_DIR = os.path.join(BASE_DIR, "castorice_images")
 HOSHINO_IMAGE_DIR = os.path.join(BASE_DIR, "hoshino_images")
 ALICE_IMAGE_DIR = os.path.join(BASE_DIR, "alice_images")
 
+# ==================== 🆕 /image 指令图片目录 ====================
+EXAMPLE_IMAGE_DIR = os.path.join(BASE_DIR, "example")
+try:
+    os.makedirs(EXAMPLE_IMAGE_DIR, exist_ok=True)
+except Exception as _e:
+    print(f"⚠️ [启动自检] 创建 example 目录失败: {_e}")
+
 print(f"🖼️ [启动自检] Gura 图片目录: {IMAGE_DIR}")
 print(f"🖼️ [启动自检] Gura 目录存在: {os.path.exists(IMAGE_DIR)}")
 print(f"🖼️ [启动自检] Gura normal.jpg 存在: {os.path.exists(os.path.join(IMAGE_DIR, 'normal.jpg'))}")
@@ -374,6 +381,8 @@ print(f"🖼️ [启动自检] Hoshino normal.jpg 存在: {os.path.exists(os.pat
 print(f"🖼️ [启动自检] Alice 图片目录: {ALICE_IMAGE_DIR}")
 print(f"🖼️ [启动自检] Alice 目录存在: {os.path.exists(ALICE_IMAGE_DIR)}")
 print(f"🖼️ [启动自检] Alice normal.jpg 存在: {os.path.exists(os.path.join(ALICE_IMAGE_DIR, 'normal.jpg'))}")
+print(f"🖼️ [启动自检] Example 图片目录: {EXAMPLE_IMAGE_DIR}")
+print(f"🖼️ [启动自检] Example 目录存在: {os.path.exists(EXAMPLE_IMAGE_DIR)}")
 
 EMOTION_FILE = {
     "normal": "normal.jpg",
@@ -1613,6 +1622,78 @@ async def queue_cmd(interaction: discord.Interaction):
 
 # ==================== 🎵 音乐系统结束 ====================
 
+
+# ==================== 🆕 /image 随机图片系统 ====================
+IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
+
+
+def _list_images_in_dir(dir_path: str):
+    """返回目录下所有图片文件的绝对路径列表（不含子目录）。"""
+    if not os.path.isdir(dir_path):
+        return []
+    try:
+        out = []
+        for name in os.listdir(dir_path):
+            full = os.path.join(dir_path, name)
+            if os.path.isfile(full) and name.lower().endswith(IMAGE_EXTS):
+                out.append(full)
+        return out
+    except Exception as e:
+        print(f"⚠️ [image] 读取目录失败 {dir_path}: {e}")
+        return []
+
+
+@bot.tree.command(name="image", description="从 example 文件夹随机抽取一张图片")
+@app_commands.describe(character="角色名称（目前支持：gura）")
+async def image_cmd(interaction: discord.Interaction, character: str = "gura"):
+    try:
+        await interaction.response.defer()
+    except Exception:
+        pass
+
+    char_key = (character or "gura").strip().lower()
+
+    # 优先 example/<character>/ 子文件夹；没有再退回 example/
+    candidates = [
+        os.path.join(EXAMPLE_IMAGE_DIR, char_key),
+        EXAMPLE_IMAGE_DIR,
+    ]
+
+    target_dir = None
+    for d in candidates:
+        if os.path.isdir(d):
+            target_dir = d
+            break
+
+    if target_dir is None:
+        await interaction.followup.send(
+            f"❌ 找不到 example 文件夹。请在项目根目录创建：`{EXAMPLE_IMAGE_DIR}`"
+        )
+        return
+
+    files = _list_images_in_dir(target_dir)
+    if not files:
+        await interaction.followup.send(
+            f"❌ `{os.path.basename(target_dir)}` 文件夹里没有图片。\n"
+            f"请把图片（png/jpg/jpeg/webp/gif）放进去：`{target_dir}`"
+        )
+        return
+
+    chosen = random.choice(files)
+    print(f"🖼️ [image] 随机抽取: {chosen}")
+
+    try:
+        await interaction.followup.send(file=discord.File(chosen))
+    except discord.HTTPException as e:
+        print(f"⚠️ [image] 发送失败（Discord）: {e}")
+        await interaction.followup.send(f"❌ 发送图片失败：{e}")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"❌ 发送图片失败：{e}")
+# ==================== /image 系统结束 ====================
+
+
 @bot.event
 async def on_ready():
     global BOT_LOOP
@@ -1646,6 +1727,7 @@ async def on_ready():
     print(f"   !english       → 整个频道切换为英文模式")
     print(f"   !resetlanguage → 整个频道切换回华语模式")
     print(f"🎵 音乐指令（斜杠）：/play /pause /resume /skip /stop /leave /volume /queue")
+    print(f"🖼️ 随机图片指令（斜杠）：/image [character]  → 从 example 文件夹随机抽图")
     print(f"👑 老板 ID（aka千面）: {AKA_MASTER_ID} — 童天AI公司创始人 & Gura 的哥哥")
     print(f"🌟 特殊身份（天童ixo）: {TENDO_IXO_ID} (kei 的创作者)")
     print(f"🌟 特殊身份（Kei）: {KEI_ID} (Alice 的姐姐 — 拥有全部权力)")
@@ -1661,6 +1743,7 @@ async def on_ready():
     print(f"🧠 记忆配置: 扫描 {HISTORY_SCAN_LIMIT} 条 | 自己 {HISTORY_MAX_SELF} 条 | 他人 {HISTORY_MAX_OTHERS} 条 | 上限 {HISTORY_MAX_CHARS} 字")
     print(f"📢 最近聊天流: 前 {HISTORY_RECENT_FOCUS} 条（允许 AI 自然提一嘴，最多 3 件事）")
     print(f"📝 timeout_list.txt 路径: {TIMEOUT_LIST_FILE}")
+    print(f"🖼️ example 图片目录: {EXAMPLE_IMAGE_DIR}")
     print("----------------------------------------")
     await load_timeout_list()
     _ensure_question_files()
