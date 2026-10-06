@@ -1490,7 +1490,7 @@ async def play_cmd(interaction: discord.Interaction, query: str):
             if player.channel != interaction.user.voice.channel:
                 await player.move_to(interaction.user.voice.channel)
         else:
-            player = await interaction.user.voice.channel.connect(cls=wavelink.Player)
+            player = await interaction.user.voice.channel.connect(cls=wavelink.Player, timeout=90.0)
     except Exception as e:
         await interaction.followup.send(f"❌ 无法连接语音频道：{e}")
         return
