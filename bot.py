@@ -6,52 +6,14 @@ import random
 import time
 import threading
 import collections
-import base64
-import tempfile
 import discord
 from discord.ext import commands
 from discord import app_commands
-from discord import FFmpegPCMAudio
 from flask import Flask
 from google import genai
 from google.genai import types
 from pathlib import Path
-
-# ==================== 🎵 yt-dlp & FFmpeg ====================
-try:
-    import yt_dlp
-except ImportError:
-    yt_dlp = None
-    print("⚠️ [音乐] 未安装 yt-dlp，音乐功能不可用。请 pip install yt-dlp")
-
-try:
-    import imageio_ffmpeg
-    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
-    print(f"🎬 [FFmpeg] 使用 imageio-ffmpeg: {FFMPEG_EXE}")
-except ImportError:
-    FFMPEG_EXE = None
-    print("🎬 [FFmpeg] 未安装 imageio-ffmpeg，将使用系统 PATH 中的 ffmpeg")
-
-# ==================== 🍪 YouTube Cookies & 代理支持 ====================
-YT_COOKIES_PATH = None
-_yt_cookies_b64 = os.environ.get("YT_COOKIES_B64")
-if _yt_cookies_b64:
-    try:
-        _tmp = tempfile.NamedTemporaryFile(mode='wb', suffix='.txt', delete=False)
-        _tmp.write(base64.b64decode(_yt_cookies_b64))
-        _tmp.close()
-        YT_COOKIES_PATH = _tmp.name
-        print(f"🍪 [Cookies] YouTube Cookies 已加载")
-    except Exception as e:
-        print(f"⚠️ [Cookies] 加载失败: {e}")
-else:
-    print("🍪 [Cookies] 未提供 YT_COOKIES_B64，跳过")
-
-YTDLP_PROXY = os.environ.get("YTDLP_PROXY")
-if YTDLP_PROXY:
-    print(f"🌐 [代理] 已启用代理: {YTDLP_PROXY}")
-else:
-    print("🌐 [代理] 未配置代理")
+import wavelink
 
 # ==================== 🌐 Flask 健康检查（给 Render 用） ====================
 app = Flask(__name__)
@@ -72,7 +34,7 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 # =========================================================================
 # ==================== 🛠️ 凭证与功能配置区域 ====================
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN") or "MTU1MDE4MDI5ODM2NzQ0MzA2NQ.G6zHtQ.m1VT52lworDeP1fYPWKbTBkP__MoGeeXIdxN00"
+DISCORD_TOKEN = "MTU1MDE4MDI5ODM2NzQ0MzA2NQ.G6zHtQ.m1VT52lworDeP1fYPWKbTBkP__MoGeeXIdxN00"
 
 # ==================== 🔑 多 API Key 池（顺序消耗制） ====================
 GEMINI_API_KEYS = [
@@ -1424,427 +1386,227 @@ async def help_game_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-# ==================== 🎵 音乐播放系统（斜杠指令版） ====================
-BOT_LOOP = None
 
-music_queues = {}
-now_playing = {}
-music_volumes = {}
-DEFAULT_VOLUME = 0.5
+# ==================== 🎵 音乐播放系统（wavelink + Sonata 版） ====================
 
-# ---------- 反 bot 拦截的核心配置 ----------
-_UA_MOBILE = (
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' 
-    '(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36'
-)
-
-YTDL_SEARCH_OPTIONS = {
-    'format': 'bestaudio/best/best*',
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-    'extract_flat': True,
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['mweb', 'tv', 'web_safari'],
-            'po_token': ['bgutil:script'],
-    }
-},
-    'user_agent': _UA_MOBILE,
-    'sleep_interval': 1,
-    'max_sleep_interval': 3,
-}
-
-YTDL_STREAM_OPTIONS = {
-    'format': 'bestaudio/best/best*',
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'source_address': '0.0.0.0',
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['mweb', 'tv', 'web_safari'],
-            'po_token': ['bgutil:script'],
-    }
-},
-    'user_agent': _UA_MOBILE,
-    'sleep_interval': 1,
-    'max_sleep_interval': 3,
-    'remote_components': 'ejs:github',
-}
-
-if YT_COOKIES_PATH:
-    YTDL_SEARCH_OPTIONS['cookiefile'] = YT_COOKIES_PATH
-    YTDL_STREAM_OPTIONS['cookiefile'] = YT_COOKIES_PATH
-    print(f"🍪 [yt-dlp] 已挂载 cookiefile: {YT_COOKIES_PATH}")
-
-if YTDLP_PROXY:
-    YTDL_SEARCH_OPTIONS['proxy'] = YTDLP_PROXY
-    YTDL_STREAM_OPTIONS['proxy'] = YTDLP_PROXY
-    print(f"🌐 [yt-dlp] 已挂载 proxy: {YTDLP_PROXY}")
-
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn',
-}
-
-
-def _yt_search(query: str, limit: int = 20):
-    if yt_dlp is None:
-        return []
-    with yt_dlp.YoutubeDL(YTDL_SEARCH_OPTIONS) as ydl:
-        try:
-            if query.startswith(('http://', 'https://')):
-                info = ydl.extract_info(query, download=False)
-                return [{
-                    'title': info.get('title', '未知歌曲'),
-                    'url': info.get('webpage_url') or query,
-                }]
-            info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
-            results = []
-            for e in info.get('entries', [])[:limit]:
-                if not e:
-                    continue
-                vid = e.get('id')
-                results.append({
-                    'title': e.get('title', '未知歌曲'),
-                    'url': e.get('webpage_url') or f"https://www.youtube.com/watch?v={vid}",
-                })
-            return results
-        except Exception as e:
-            print(f"❌ [音乐] yt-dlp 搜索失败: {e}")
-            return []
-
-
-def _get_stream_url(video_url: str, max_retries: int = 3):
-    last_err = None
-    for attempt in range(max_retries):
-        try:
-            with yt_dlp.YoutubeDL(YTDL_STREAM_OPTIONS) as ydl:
-                info = ydl.extract_info(video_url, download=False)
-                return info['url'], info.get('title', '未知歌曲')
-        except Exception as e:
-            last_err = e
-            err_lower = str(e).lower()
-            # 针对临时性错误进行重试
-            if "the page needs to be reloaded" in err_lower:
-                wait = 2 ** attempt
-                print(f"⚠️ [音乐] 遇到临时错误，{wait} 秒后重试（第 {attempt + 1}/{max_retries} 次）...")
-                time.sleep(wait)
-                continue
-            raise
-    raise last_err
-
-def _play_next(voice_client, guild_id):
-    queue = music_queues.get(guild_id)
-    if not queue:
-        now_playing.pop(guild_id, None)
-        if BOT_LOOP and voice_client.is_connected():
-            asyncio.run_coroutine_threadsafe(voice_client.disconnect(), BOT_LOOP)
-        return
-
-    video_url, _ = queue.popleft()
-
-    try:
-        audio_url, title = _get_stream_url(video_url)
-    except Exception as e:
-        print(f"❌ [音乐] 获取音频流失败: {e}，跳过这首")
-        _play_next(voice_client, guild_id)
-        return
-
-    now_playing[guild_id] = title
-
-    source = FFmpegPCMAudio(audio_url, executable=FFMPEG_EXE, **FFMPEG_OPTIONS) \
-        if FFMPEG_EXE else FFmpegPCMAudio(audio_url, **FFMPEG_OPTIONS)
-
-    volume = music_volumes.get(guild_id, DEFAULT_VOLUME)
-    source = discord.PCMVolumeTransformer(source, volume=volume)
-
-    def _after(err):
-        if err:
-            print(f"❌ [音乐] 播放错误: {err}")
-        _play_next(voice_client, guild_id)
-
-    voice_client.play(source, after=_after)
-    print(f"🎶 [音乐] 正在播放: {title}")
-
-
-async def _ensure_voice(interaction: discord.Interaction):
-    if not interaction.user.voice:
-        return None, "❌ 你先要加入一个语音频道，我才能进去放歌哦～"
-
-    voice_channel = interaction.user.voice.channel
-    voice_client = interaction.guild.voice_client
-
-    try:
-        if voice_client is None:
-            voice_client = await voice_channel.connect()
-        elif voice_client.channel != voice_channel:
-            await voice_client.move_to(voice_channel)
-    except Exception as e:
-        return None, f"❌ 无法连接语音频道：{e}"
-
-    return voice_client, None
-
+# ==================== 🎵 音乐播放系统（wavelink + Sonata 版） ====================
 
 class SongSelectView(discord.ui.View):
-    def __init__(self, results, page, guild_id, voice_client, requester_id, per_page=10):
-        super().__init__(timeout=180)
-        self.results = results
-        self.page = page
-        self.guild_id = guild_id
-        self.voice_client = voice_client
+    def __init__(self, tracks, player, requester_id):
+        super().__init__(timeout=120)
+        self.tracks = tracks
+        self.player = player
         self.requester_id = requester_id
-        self.per_page = per_page
-        self._build()
 
-    def _build(self):
-        self.clear_items()
-        start = self.page * self.per_page
-        end = min(start + self.per_page, len(self.results))
-
-        for i in range(start, end):
-            r = self.results[i]
-            title = r['title']
-            short = title if len(title) <= 70 else title[:70] + "…"
-            label = f"{i + 1}. {short}"
+        for i, track in enumerate(tracks):
+            title = track.title
+            short = title if len(title) <= 60 else title[:60] + "…"
             btn = discord.ui.Button(
-                label=label[:80],
+                label=f"{i + 1}. {short}",
                 style=discord.ButtonStyle.primary,
-                row=(i - start) // 5,
+                row=i // 5,
             )
-            btn.callback = self._make_select_callback(i)
+            btn.callback = self._make_callback(i)
             self.add_item(btn)
 
-        nav_row = 2
-        if self.page > 0:
-            prev = discord.ui.Button(label="⬅️ 上一页", style=discord.ButtonStyle.secondary, row=nav_row)
-            prev.callback = self._prev_page
-            self.add_item(prev)
-        if end < len(self.results):
-            nxt = discord.ui.Button(label="➡️ 下一页", style=discord.ButtonStyle.secondary, row=nav_row)
-            nxt.callback = self._next_page
-            self.add_item(nxt)
-        cancel = discord.ui.Button(label="❌ 取消", style=discord.ButtonStyle.danger, row=nav_row)
+        cancel = discord.ui.Button(
+            label="❌ 取消",
+            style=discord.ButtonStyle.danger,
+            row=2,
+        )
         cancel.callback = self._cancel
         self.add_item(cancel)
 
     def build_embed(self):
-        start = self.page * self.per_page
-        end = min(start + self.per_page, len(self.results))
-        desc_lines = [
-            f"`{start + i + 1}.` {self.results[start + i]['title'][:80]}"
-            for i in range(end - start)
+        lines = [
+            f"`{i + 1}.` {t.title[:80]}"
+            for i, t in enumerate(self.tracks)
         ]
         embed = discord.Embed(
-            title=f"🎵 搜索结果（第 {self.page + 1} 页）",
-            description="请点击下方按钮选择要播放的歌曲：\n\n" + "\n".join(desc_lines),
+            title="🎵 搜索结果",
+            description="请点击下方按钮选择要播放的歌曲：\n\n" + "\n".join(lines),
             color=0x1DB954,
         )
-        embed.set_footer(text=f"共 {len(self.results)} 个结果 | 第 {start + 1}-{end} 首")
+        embed.set_footer(text=f"共 {len(self.tracks)} 首 | 120 秒内选择")
         return embed
 
-    def _make_select_callback(self, index):
+    def _make_callback(self, index):
         async def callback(interaction: discord.Interaction):
             if interaction.user.id != self.requester_id:
-                await interaction.response.send_message("❌ 这不是你的搜索哦～ 请自己用 /play 搜索。", ephemeral=True)
-                return
-            song = self.results[index]
-            try:
-                await interaction.response.defer()
-                audio_url, title = await asyncio.to_thread(_get_stream_url, song['url'])
-            except Exception as e:
-                try:
-                    await interaction.followup.send(f"❌ 获取音频失败: {e}")
-                except Exception:
-                    pass
-                return
-
-            if self.guild_id not in music_queues:
-                music_queues[self.guild_id] = collections.deque()
-            music_queues[self.guild_id].append((song['url'], title))
-
-            if not self.voice_client.is_playing() and not self.voice_client.is_paused():
-                _play_next(self.voice_client, self.guild_id)
-                await interaction.followup.send(f"🎶 正在播放：**{title}**")
-            else:
-                await interaction.followup.send(
-                    f"📥 已加入队列：**{title}**（前面还有 {len(music_queues[self.guild_id]) - 1} 首）"
+                await interaction.response.send_message(
+                    "❌ 这不是你的搜索哦～ 请自己用 /play 搜索。",
+                    ephemeral=True,
                 )
+                return
+            track = self.tracks[index]
+            await self.player.play(track)
+            await interaction.response.edit_message(
+                content=f"🎶 正在播放：**{track.title}**",
+                embed=None,
+                view=None,
+            )
             self.stop()
-
         return callback
-
-    async def _prev_page(self, interaction: discord.Interaction):
-        if interaction.user.id != self.requester_id:
-            await interaction.response.send_message("❌ 这不是你的搜索哦～", ephemeral=True)
-            return
-        self.page -= 1
-        self._build()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-
-    async def _next_page(self, interaction: discord.Interaction):
-        if interaction.user.id != self.requester_id:
-            await interaction.response.send_message("❌ 这不是你的搜索哦～", ephemeral=True)
-            return
-        self.page += 1
-        self._build()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def _cancel(self, interaction: discord.Interaction):
         if interaction.user.id != self.requester_id:
-            await interaction.response.send_message("❌ 这不是你的搜索哦～", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ 这不是你的搜索哦～",
+                ephemeral=True,
+            )
             return
-        await interaction.response.edit_message(content="❌ 已取消搜索。", embed=None, view=None)
+        await interaction.response.edit_message(
+            content="❌ 已取消搜索。",
+            embed=None,
+            view=None,
+        )
         self.stop()
 
 
 @bot.tree.command(name="play", description="搜索并播放歌曲")
-@app_commands.describe(query="歌曲名称，或者 YouTube 链接")
+@app_commands.describe(query="歌曲名称，或者 YouTube/Spotify 链接")
 async def play_cmd(interaction: discord.Interaction, query: str):
-    voice_client, err = await _ensure_voice(interaction)
-    if err:
-        await interaction.response.send_message(err, ephemeral=True)
+    if not interaction.user.voice:
+        await interaction.response.send_message("❌ 你先要加入一个语音频道。", ephemeral=True)
         return
 
     await interaction.response.defer()
-    await interaction.followup.send(f"🔍 正在搜索：`{query}` ...")
 
     try:
-        results = await asyncio.to_thread(_yt_search, query, 20)
+        if interaction.guild.voice_client:
+            player = interaction.guild.voice_client
+            if player.channel != interaction.user.voice.channel:
+                await player.move_to(interaction.user.voice.channel)
+        else:
+            player = await interaction.user.voice.channel.connect(cls=wavelink.Player)
     except Exception as e:
-        await interaction.followup.send(f"❌ 搜索出错：{e}")
+        await interaction.followup.send(f"❌ 无法连接语音频道：{e}")
+        return
+
+    try:
+        results = await wavelink.Playable.search(query, source=wavelink.TrackSource.SoundCloud)
+    except Exception as e:
+        await interaction.followup.send(f"❌ 搜索失败：{e}")
         return
 
     if not results:
         await interaction.followup.send("❌ 搜索不到结果，换个关键词试试吧。")
         return
 
-    view = SongSelectView(results, 0, interaction.guild.id, voice_client, interaction.user.id)
-    await interaction.followup.send(embed=view.build_embed(), view=view)
+    track = results.tracks[0] if isinstance(results, wavelink.Playlist) else results[0]
+    await player.play(track)
+    await interaction.followup.send(f"🎶 正在播放：**{track.title}**")
 
 
 @bot.tree.command(name="pause", description="暂停当前播放")
 async def pause_cmd(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
-    if not voice_client:
+    player = interaction.guild.voice_client
+    if not player:
         await interaction.response.send_message("❌ 我不在语音频道。", ephemeral=True)
         return
-    if voice_client.is_playing():
-        voice_client.pause()
-        await interaction.response.send_message("⏸️ 已暂停播放。")
-    elif voice_client.is_paused():
+    if getattr(player, "paused", False):
         await interaction.response.send_message("⚠️ 已经处于暂停状态。", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ 现在没有在播放歌曲。", ephemeral=True)
+        return
+    await player.pause(True)
+    await interaction.response.send_message("⏸️ 已暂停播放。")
 
 
 @bot.tree.command(name="resume", description="继续播放")
 async def resume_cmd(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
-    if not voice_client:
+    player = interaction.guild.voice_client
+    if not player:
         await interaction.response.send_message("❌ 我不在语音频道。", ephemeral=True)
         return
-    if voice_client.is_paused():
-        voice_client.resume()
-        await interaction.response.send_message("▶️ 已继续播放。")
-    elif voice_client.is_playing():
+    if not getattr(player, "paused", False):
         await interaction.response.send_message("⚠️ 已经在播放中。", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ 现在没有在播放歌曲。", ephemeral=True)
+        return
+    await player.pause(False)
+    await interaction.response.send_message("▶️ 已继续播放。")
 
 
 @bot.tree.command(name="skip", description="跳过当前歌曲")
 async def skip_cmd(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
-    if not voice_client:
+    player = interaction.guild.voice_client
+    if not player:
         await interaction.response.send_message("❌ 我不在语音频道。", ephemeral=True)
         return
-    if voice_client.is_playing() or voice_client.is_paused():
-        voice_client.stop()
-        await interaction.response.send_message("⏭️ 已跳过当前歌曲。")
-    else:
+    if not getattr(player, "current", None):
         await interaction.response.send_message("❌ 现在没有在播放歌曲。", ephemeral=True)
+        return
+    await player.skip()
+    await interaction.response.send_message("⏭️ 已跳过当前歌曲。")
 
 
 @bot.tree.command(name="volume", description="调整音量（0-200）")
-@app_commands.describe(level="音量大小，范围 0-200，100 为原始音量")
+@app_commands.describe(level="音量大小，范围 0-200")
 async def volume_cmd(interaction: discord.Interaction, level: int):
-    voice_client = interaction.guild.voice_client
-    if not voice_client:
+    player = interaction.guild.voice_client
+    if not player:
         await interaction.response.send_message("❌ 我不在语音频道。", ephemeral=True)
         return
     if level < 0 or level > 200:
         await interaction.response.send_message("❌ 音量范围是 0-200。", ephemeral=True)
         return
-
-    guild_id = interaction.guild.id
-    music_volumes[guild_id] = level / 100.0
-
-    src = getattr(voice_client, "source", None)
-    if isinstance(src, discord.PCMVolumeTransformer):
-        src.volume = level / 100.0
-
+    await player.set_volume(level)
     await interaction.response.send_message(f"🔊 音量已设置为 **{level}%**。")
 
 
-@bot.tree.command(name="stop", description="停止播放，清空队列并离开语音频道")
+@bot.tree.command(name="stop", description="停止播放并离开语音频道")
 async def stop_cmd(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
-    if not voice_client:
+    player = interaction.guild.voice_client
+    if not player:
         await interaction.response.send_message("❌ 我不在语音频道。", ephemeral=True)
         return
-
-    guild_id = interaction.guild.id
-    music_queues.pop(guild_id, None)
-    now_playing.pop(guild_id, None)
-
-    try:
-        if voice_client.is_playing() or voice_client.is_paused():
-            voice_client.stop()
-        await voice_client.disconnect()
-    except Exception as e:
-        print(f"⚠️ [音乐] stop 出错: {e}")
-
-    await interaction.response.send_message("⏹️ 已停止播放、清空队列，并离开语音频道。")
+    await player.disconnect()
+    await interaction.response.send_message("⏹️ 已停止播放并离开语音频道。")
 
 
-@bot.tree.command(name="leave", description="让机器人离开语音频道（保留队列）")
+@bot.tree.command(name="leave", description="让机器人离开语音频道")
 async def leave_cmd(interaction: discord.Interaction):
-    voice_client = interaction.guild.voice_client
-    if not voice_client:
+    player = interaction.guild.voice_client
+    if not player:
         await interaction.response.send_message("❌ 我不在语音频道。", ephemeral=True)
         return
-    await voice_client.disconnect()
+    await player.disconnect()
     await interaction.response.send_message("👋 已离开语音频道。")
 
 
 @bot.tree.command(name="queue", description="查看当前播放队列")
 async def queue_cmd(interaction: discord.Interaction):
-    guild_id = interaction.guild.id
-    lines = []
-    if guild_id in now_playing:
-        lines.append(f"🎶 **正在播放：** {now_playing[guild_id]}")
-    queue = music_queues.get(guild_id)
-    if queue:
-        for i, (_, title) in enumerate(queue, 1):
-            lines.append(f"`{i}.` {title}")
-    if not lines:
+    player = interaction.guild.voice_client
+    if not player or not getattr(player, "queue", None):
         await interaction.response.send_message("📭 队列是空的。")
         return
+    lines = []
+    if getattr(player, "current", None):
+        lines.append(f"🎶 **正在播放：** {player.current.title}")
+    for i, track in enumerate(player.queue, 1):
+        lines.append(f"`{i}.` {track.title}")
     embed = discord.Embed(title="🎵 播放队列", description="\n".join(lines), color=0x1DB954)
     await interaction.response.send_message(embed=embed)
 
-
 # ==================== 🎵 音乐系统结束 ====================
-
 
 @bot.event
 async def on_ready():
     global BOT_LOOP
     BOT_LOOP = asyncio.get_running_loop()
+    # ==================== 🎵 连接 Sonata 音频节点 ====================
+    try:
+        node = wavelink.Node(
+            uri=os.environ.get("SONATA_URI", "http://localhost:2333"),
+            password=os.environ.get("SONATA_PASSWORD", "youshallnotpass"),
+        )
+        await wavelink.Pool.connect(
+            nodes=[node],
+            client=bot,
+            cache_capacity=256,
+        )
+        print(f"✅ [音乐] 已连接到 Sonata 节点: {node.uri}")
+    except Exception as e:
+        print(f"⚠️ [音乐] Sonata 节点连接失败: {e}")
+
+    # ================================================================
     print(f"🦈 童天AI公司 · 七人格音轨登录成功！")
     print(f"🏢 公司名: {COMPANY_NAME} | 老板: aka千面")
     print(f"✨ 默认处于【Gura 表人格】（aka千面 的妹妹）。")
