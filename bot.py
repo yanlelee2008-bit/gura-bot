@@ -412,8 +412,14 @@ DEHUMANIZE_FIX_NOTE = """
 
 ════ 回复长度 ════
 · 默认 1～3 句话，10～50 字。用户明显求长内容才写长。
-· 超过 80 字的回复要自我截断，宁可少说，不要写小作文。
+· 超过 120 字的回复要自我截断，宁可少说，不要写小作文。
 · 允许只回一个「嗯」「？」「……」「哈？」「啧」「哦」。
+
+════ 多条连发 ════
+· 真人会连发好几条小消息。系统会把你的回复按节奏切成 1～10 条气泡。
+· 你可以自然地用「。」「…」「！」「？」「换行」分段。
+· 每段是一口气说完的一小截，可以很短，也可以稍长。
+· 但不要为了凑条数而拆句；只在自然停顿处断。
 
 ════ 表达方式 ════
 · 用口语：诶、啊这、唔、嗯…、嘛、啦、诶诶诶、草、哈、呃、emmm
@@ -620,9 +626,9 @@ def roughen_text(text: str) -> str:
     return text
 
 
-# ==================== 📨 真人化分条发送 ====================
-def split_into_human_bubbles(text: str, max_bubbles: int = 4):
-    """把一段话拆成 1~4 条像真人逐条发的消息。"""
+# ==================== 📨 真人化分条发送（最多 10 条） ====================
+def split_into_human_bubbles(text: str, max_bubbles: int = 10):
+    """把一段话拆成 1~10 条像真人逐条发的消息。"""
     if not text:
         return ["……"]
 
@@ -631,11 +637,17 @@ def split_into_human_bubbles(text: str, max_bubbles: int = 4):
         return ["……"]
 
     # 短内容直接一条
-    if len(text) < 28 or not re.search(r'[。！？!?…\n]', text):
+    if len(text) < 18:
         return [text]
 
+    # 按句末标点 + 换行 切
     parts = re.split(r'(?<=[。！？!?…\n])', text)
     parts = [p.strip() for p in parts if p.strip()]
+
+    # 如果切完没有多余片段，尝试按逗号 / 空格 / 破折号继续切
+    if len(parts) <= 1 and len(text) > 40:
+        parts = re.split(r'(?<=[，,、—～~])', text)
+        parts = [p.strip() for p in parts if p.strip()]
 
     if len(parts) <= 1:
         return [text]
@@ -644,12 +656,13 @@ def split_into_human_bubbles(text: str, max_bubbles: int = 4):
     buf = ""
     for p in parts:
         buf += p
-        if len(buf) >= 8 and random.random() < 0.6:
+        # 缓冲区达到一定长度后随机断开
+        if len(buf) >= 3 and random.random() < 0.55:
             bubbles.append(buf)
             buf = ""
 
     if buf:
-        if bubbles and len(buf) < 6:
+        if bubbles and len(buf) < 4:
             bubbles[-1] += buf
         else:
             bubbles.append(buf)
@@ -657,6 +670,7 @@ def split_into_human_bubbles(text: str, max_bubbles: int = 4):
     if len(bubbles) <= 1:
         return [text]
 
+    # 超过上限就合并尾部
     if len(bubbles) > max_bubbles:
         head = bubbles[:max_bubbles - 1]
         tail = "".join(bubbles[max_bubbles - 1:])
@@ -666,35 +680,53 @@ def split_into_human_bubbles(text: str, max_bubbles: int = 4):
 
 
 async def send_human_like(message, text, img_path=None):
-    """按真人节奏分条发送，逐条有打字停顿。"""
-    text = (text or "……").strip() or "……"
+    """按真人节奏分条发送，逐条有打字停顿。最多 10 条。"""
+    try:
+        text = (text or "……").strip() or "……"
 
-    bubbles = split_into_human_bubbles(text)
+        bubbles = split_into_human_bubbles(text, max_bubbles=10)
 
-    for i, chunk in enumerate(bubbles):
-        # 打字时长：基础 0.35s + 每字 0.03s + 抖动，上限 2.2s
-        delay = 0.35 + len(chunk) * 0.03 + random.uniform(0, 0.5)
-        delay = min(delay, 2.2)
+        for i, chunk in enumerate(bubbles):
+            # 根据长度调整打字时长
+            if len(chunk) <= 4:
+                delay = random.uniform(0.25, 0.55)
+            elif len(chunk) <= 15:
+                delay = 0.35 + len(chunk) * 0.03 + random.uniform(0, 0.35)
+            else:
+                delay = 0.45 + len(chunk) * 0.025 + random.uniform(0, 0.45)
+            delay = min(delay, 1.8)
 
-        try:
-            async with message.channel.typing():
-                await asyncio.sleep(delay)
-        except Exception:
-            await asyncio.sleep(delay)
+            try:
+                async with message.channel.typing():
+                    await asyncio.sleep(delay)
+            except Exception:
+                try:
+                    await asyncio.sleep(delay)
+                except Exception:
+                    pass
 
-        if i == 0:
-            await safe_send(message, chunk, img_path=img_path)
-        else:
-            await safe_send(message, chunk)
+            try:
+                if i == 0:
+                    await safe_send(message, chunk, img_path=img_path)
+                else:
+                    await safe_send(message, chunk)
+            except Exception as e:
+                print(f"⚠️ [send_human_like] 第 {i+1} 条发送失败: {e}")
 
-        # 气泡之间的小停顿
-        if i < len(bubbles) - 1:
-            await asyncio.sleep(random.uniform(0.35, 0.9))
+            # 气泡之间的小停顿
+            if i < len(bubbles) - 1:
+                await asyncio.sleep(random.uniform(0.25, 0.7))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"⚠️ [send_human_like] 整条兜底失败: {e}")
 # =========================================================
 
 
 def get_personality_config(prompt_text):
-    """温度整体上调 + 采样惩罚，让人话更像人。"""
+    """温度整体上调 + 采样惩罚，让人话更像人。
+    参数会按「从完整到最简」逐级尝试，任何一级失败都自动降级，
+    保证永远不会因为参数不被 SDK / 模型支持而把整个机器人打死。"""
     if prompt_text == GURA_PROMPT_NORMAL:
         temp = 1.05
     elif prompt_text == GURA_PROMPT_YANDERE:
@@ -712,15 +744,27 @@ def get_personality_config(prompt_text):
     else:
         temp = 1.05
 
-    return types.GenerateContentConfig(
-        system_instruction=prompt_text,
-        temperature=temp,
-        top_p=0.95,
-        top_k=40,
-        max_output_tokens=500,      # 硬上限，防小作文
-        presence_penalty=0.4,       # 抑制"我理解你""作为..."套话复读
-        frequency_penalty=0.3,      # 抑制同词反复
-    )
+    # 按优先级从高到低尝试，任何一步构造成功就立即返回
+    candidates = [
+        dict(temperature=temp, top_p=0.95, top_k=40, max_output_tokens=800),
+        dict(temperature=temp, top_p=0.95, max_output_tokens=800),
+        dict(temperature=temp, max_output_tokens=800),
+        dict(temperature=temp),
+    ]
+
+    last_err = None
+    for cfg in candidates:
+        try:
+            return types.GenerateContentConfig(
+                system_instruction=prompt_text,
+                **cfg,
+            )
+        except Exception as e:
+            last_err = e
+            continue
+
+    print(f"⚠️ [配置] 所有参数组合都失败，使用纯最小配置: {last_err}")
+    return types.GenerateContentConfig(system_instruction=prompt_text)
 
 
 # ==================== 🔁 模型回退与重试机制 ====================
@@ -844,7 +888,7 @@ DISCORD_LIMIT = 1900
 # ==================== 🛡️ Discord 全局限流保护 ====================
 DISCORD_SEND_LOCK = asyncio.Lock()
 _last_discord_send_ts = 0.0
-DISCORD_MIN_GAP = 1.2
+DISCORD_MIN_GAP = 1.0
 GLOBAL_RATE_LIMIT_UNTIL = 0.0
 # ==============================================================
 
@@ -1898,7 +1942,8 @@ async def on_ready():
     print(f"📢 最近聊天流: 前 {HISTORY_RECENT_FOCUS} 条（允许 AI 自然提一嘴，最多 3 件事）")
     print(f"📝 timeout_list.txt 路径: {TIMEOUT_LIST_FILE}")
     print(f"🖼️ example 图片目录: {EXAMPLE_IMAGE_DIR}")
-    print(f"🧬 真人化引擎：已启用（温度 1.0~1.10 / 分条发送 / 加糙后处理）")
+    print(f"🧬 真人化引擎：已启用（温度 1.0~1.10 / 最多 10 条连发 / 加糙后处理）")
+    print(f"🎯 @聚焦模式：专门 @ 机器人时，只读该用户最近 10 条消息，不看旁观者")
     print("----------------------------------------")
     await load_timeout_list()
     _ensure_question_files()
@@ -2099,11 +2144,11 @@ async def reset_language(ctx):
     await ctx.reply("好，切回华语了。想再切英文打 !english")
 
 
-# ==================== 📜 历史抓取（可被并行 await） ====================
-HISTORY_SCAN_LIMIT   = 15
-HISTORY_MAX_SELF     = 5
-HISTORY_MAX_OTHERS   = 6
-HISTORY_MAX_CHARS    = 1500
+# ==================== 📜 历史抓取（支持 @ 聚焦模式） ====================
+HISTORY_SCAN_LIMIT   = 40      # 扫描窗口（够大，能抓 10 条目标用户消息）
+HISTORY_MAX_SELF     = 10      # 当前用户最近 10 条
+HISTORY_MAX_OTHERS   = 8       # 旁观者最多 8 条
+HISTORY_MAX_CHARS    = 3000    # 上下文总长度上限
 HISTORY_PER_MSG_MAX  = 200
 HISTORY_RECENT_FOCUS = 3
 
@@ -2120,13 +2165,22 @@ def _fmt_hist_msg(msg, is_self):
     return f"{prefix}: {content}"
 
 
-async def _fetch_history(message):
-    if len((message.content or "").strip()) < 5 and not message.attachments:
+async def _fetch_history(message, focused_user_id=None, also_include_ids=None):
+    """
+    focused_user_id:
+        如果专门 @ 了机器人，就只抓这个用户（发起者）的最近 10 条消息。
+        其他旁观者全部忽略，除非……
+    also_include_ids:
+        ……用户在本条消息里特地点到的人（@ 或名字），把他们的消息也加进来。
+    """
+    also_include_ids = also_include_ids or set()
+
+    if len((message.content or "").strip()) < 3 and not message.attachments:
         return ""
 
-    recent_msgs = []
-    self_msgs = []
-    other_msgs = []
+    user_msgs = []          # focused 用户的消息（@ 模式）
+    extra_msgs = []         # 被提到的其他人的消息
+    recent_msgs = []        # 最近聊天流（非 @ 模式）
 
     try:
         async for hist_msg in message.channel.history(limit=HISTORY_SCAN_LIMIT):
@@ -2137,45 +2191,71 @@ async def _fetch_history(message):
             if hist_msg.id == message.id:
                 continue
 
-            is_self = (hist_msg.author.id == message.author.id)
-            formatted = _fmt_hist_msg(hist_msg, is_self)
-            if not formatted:
-                continue
-
-            if len(recent_msgs) < HISTORY_RECENT_FOCUS:
-                recent_msgs.append(formatted)
-
-            if is_self:
-                if len(self_msgs) < HISTORY_MAX_SELF:
-                    self_msgs.append(formatted)
+            if focused_user_id is not None:
+                # ---- @聚焦模式 ----
+                if hist_msg.author.id == focused_user_id:
+                    if len(user_msgs) >= HISTORY_MAX_SELF:
+                        continue
+                    formatted = _fmt_hist_msg(hist_msg, True)
+                    if formatted:
+                        user_msgs.append(formatted)
+                elif hist_msg.author.id in also_include_ids:
+                    if len(extra_msgs) >= HISTORY_MAX_OTHERS:
+                        continue
+                    formatted = _fmt_hist_msg(hist_msg, False)
+                    if formatted:
+                        extra_msgs.append(formatted)
+                # 其他旁观者一律跳过
             else:
-                if len(other_msgs) < HISTORY_MAX_OTHERS:
-                    other_msgs.append(formatted)
+                # ---- 普通模式 ----
+                is_self = (hist_msg.author.id == message.author.id)
+                formatted = _fmt_hist_msg(hist_msg, is_self)
+                if not formatted:
+                    continue
+                if len(recent_msgs) < HISTORY_RECENT_FOCUS:
+                    recent_msgs.append(formatted)
+                if is_self:
+                    if len(user_msgs) < HISTORY_MAX_SELF:
+                        user_msgs.append(formatted)
+                else:
+                    if len(extra_msgs) < HISTORY_MAX_OTHERS:
+                        extra_msgs.append(formatted)
 
-            if (len(self_msgs) >= HISTORY_MAX_SELF
-                and len(other_msgs) >= HISTORY_MAX_OTHERS
-                and len(recent_msgs) >= HISTORY_RECENT_FOCUS):
-                break
+            # 提前退出条件
+            if focused_user_id is not None:
+                if len(user_msgs) >= HISTORY_MAX_SELF and (
+                    not also_include_ids or len(extra_msgs) >= HISTORY_MAX_OTHERS
+                ):
+                    break
+            else:
+                if (len(user_msgs) >= HISTORY_MAX_SELF
+                        and len(extra_msgs) >= HISTORY_MAX_OTHERS
+                        and len(recent_msgs) >= HISTORY_RECENT_FOCUS):
+                    break
     except Exception as e:
         print(f"⚠️ [历史抓取] 失败: {e}")
         return ""
 
+    user_msgs.reverse()
+    extra_msgs.reverse()
     recent_msgs.reverse()
-    self_msgs.reverse()
-    other_msgs.reverse()
 
     parts = []
 
-    if recent_msgs:
-        parts.append(
-            "【最近的聊天流｜最新的几条】\n"
-            + "\n".join(recent_msgs)
-        )
-
-    if self_msgs:
-        parts.append("【当前说话者最近说过的话】\n" + "\n".join(self_msgs))
-    if other_msgs:
-        parts.append("【频道里其他人最近说的话】\n" + "\n".join(other_msgs))
+    if focused_user_id is not None:
+        # @ 模式：只展示当前用户 + 被提到的旁观者
+        if user_msgs:
+            parts.append("【当前用户最近说过的话】\n" + "\n".join(user_msgs))
+        if extra_msgs:
+            parts.append("【当前用户提到的其他人最近说的话】\n" + "\n".join(extra_msgs))
+    else:
+        # 普通模式：混合展示
+        if recent_msgs:
+            parts.append("【最近的聊天流｜最新的几条】\n" + "\n".join(recent_msgs))
+        if user_msgs:
+            parts.append("【当前说话者最近说过的话】\n" + "\n".join(user_msgs))
+        if extra_msgs:
+            parts.append("【频道里其他人最近说的话】\n" + "\n".join(extra_msgs))
 
     context = "\n\n".join(parts)
 
@@ -2290,9 +2370,28 @@ async def on_message(message):
 
         current_language = channel_language.get(channel_id, 'zh')
 
+        # ---- 判定是否处于「@聚焦模式」 ----
+        is_dm = isinstance(message.channel, discord.DMChannel)
+        is_focused = bot.user.mentioned_in(message) and not is_dm
+
+        # 找出本条消息里被点名的其他人（不含机器人自己）
+        mentioned_ids = set()
+        for u in message.mentions:
+            if u.id != bot.user.id:
+                mentioned_ids.add(u.id)
+
         async with message.channel.typing():
             try:
-                history_task = asyncio.create_task(_fetch_history(message))
+                if is_focused:
+                    history_task = asyncio.create_task(
+                        _fetch_history(
+                            message,
+                            focused_user_id=message.author.id,
+                            also_include_ids=mentioned_ids,
+                        )
+                    )
+                else:
+                    history_task = asyncio.create_task(_fetch_history(message))
 
                 if moderation_task is not None:
                     try:
@@ -3054,15 +3153,28 @@ async def on_message(message):
                             "如果有人对星月不敬、恶意冒犯，你会立刻收起温和，语气变冷、变得很有压迫感——这是底线。\n"
                         )
 
-                memory_extra_note = (
-                    "【记忆使用｜允许主动接话】\n"
-                    "你可以看到频道里最近几条消息（哪怕不是对你说的）。\n"
-                    "如果最近聊的话题和当前用户有关，或能自然接上，你可以顺带提一嘴，让对话更有“你真的在听”的感觉。\n"
-                    "最多只提 3 件事，不要一次把最近所有消息都翻出来。\n"
-                    "有合适的话题就提，没有合适的话题就不要提。\n"
-                    "不要每条都硬提，不要变成“复述机器人”，不要复述整段历史，只是自然地提一句。\n"
-                    "如果最近聊天流为空或都是无关内容，就完全不要提。\n"
-                )
+                # ---- 针对不同上下文模式，给 AI 不同的记忆提示 ----
+                if is_focused:
+                    memory_extra_note = (
+                        "【记忆使用｜@聚焦模式（用户专门 @ 了你）】\n"
+                        "系统只给了你「当前用户最近说过的话」。\n"
+                        "你没有看到其他旁观者的消息——这是故意的。\n"
+                        "请把注意力集中在当前用户身上，自然回应他/她说的话。\n"
+                        "如果用户在本条消息里特地点名了某个人（@ 或名字），系统也会把那人的消息给你，\n"
+                        "这时候可以顺势提一嘴，但不要刻意。\n"
+                        "不要假装你能看到整个频道，也不要主动提你没看到的人。\n"
+                        "有合适的话题就自然接，没有就只回应当前这句话。\n"
+                    )
+                else:
+                    memory_extra_note = (
+                        "【记忆使用｜普通模式】\n"
+                        "你可以看到频道里最近几条消息（哪怕不是对你说的）。\n"
+                        "如果最近聊的话题和当前用户有关，或能自然接上，你可以顺带提一嘴，让对话更有“你真的在听”的感觉。\n"
+                        "最多只提 3 件事，不要一次把最近所有消息都翻出来。\n"
+                        "有合适的话题就提，没有合适的话题就不要提。\n"
+                        "不要每条都硬提，不要变成“复述机器人”，不要复述整段历史，只是自然地提一句。\n"
+                        "如果最近聊天流为空或都是无关内容，就完全不要提。\n"
+                    )
 
                 emotion_instruction = (
                     "\n\n（技术标签，最后单独一行输出：[[emotion:xxx]]，"
@@ -3077,7 +3189,7 @@ async def on_message(message):
                     + "不要照搬格式、标题、列表，也不要把它们说出来】\n"
                     + master_note + mode_note + language_note
                     + gura_a_trigger_note + ina_sister_mention_note + memory_extra_note
-                    + f"\n【📢 频道最近聊天流｜允许你自然顺带提一嘴，最多 3 件事，没有就别说】:\n"
+                    + f"\n【📢 上下文】:\n"
                     + f"{chat_context if chat_context else '（暂无历史记录）'}\n\n"
                     + f"【用户对你说的最新一句话】:\n{user_input if user_input else '你看这张照片怎么样？'}"
                     + emotion_instruction
@@ -3097,12 +3209,39 @@ async def on_message(message):
                     print(f"❌ [Gemini API] 异常类型: {type(api_e).__name__}")
                     print(f"❌ [Gemini API] 异常信息: {api_e}")
                     traceback.print_exc()
+
+                    # ★ 兜底：用最简配置再试一次
+                    try:
+                        fallback_client = get_active_client()
+                        minimal_cfg = types.GenerateContentConfig(
+                            system_instruction=_mode_to_prompt(current_mode),
+                            temperature=1.0,
+                        )
+                        fb_session = fallback_client.aio.chats.create(
+                            model=MODEL_CANDIDATES[0],
+                            config=minimal_cfg,
+                        )
+                        fb_resp = await fb_session.send_message(
+                            user_input if user_input else "你好"
+                        )
+                        fb_text = (fb_resp.text or "").strip() if fb_resp else ""
+                        if fb_text:
+                            fb_text = re.sub(EMOTION_TAG_PATTERN, '', fb_text, flags=re.I).strip()
+                            fb_text = roughen_text(fb_text)
+                            await send_human_like(message, fb_text or "……")
+                            return
+                    except Exception as fb_e:
+                        print(f"⚠️ [兜底] 最小配置也失败: {fb_e}")
+
                     if _is_key_exhausted(api_e):
                         await safe_send(message, "A…… API 额度全部用完了。")
                     elif _is_retryable(api_e):
-                        await safe_send(message, "……Google 那边说它现在太忙了，等一下下再跟 Gura 说话好不好？")
+                        await safe_send(message, "……Google 那边说它现在太忙了，等一下下。")
                     else:
-                        await safe_send(message, "A... 刚刚尾巴不小心拍到路由器了，没听清，你再说一遍！")
+                        await safe_send(
+                            message,
+                            f"（调试）出错：{type(api_e).__name__} | {str(api_e)[:120]}"
+                        )
                     return
 
                 raw_text = response.text if response is not None else None
@@ -3167,7 +3306,7 @@ async def on_message(message):
                         print(f"⚠️ [图片] 回退到: {img_path} 是否存在: {os.path.exists(img_path)}")
 
                     if os.path.exists(img_path):
-                        # ★ 真人化分条发送（带打字停顿）
+                        # ★ 真人化分条发送（带打字停顿，最多 10 条）
                         await send_human_like(message, text if text else "……", img_path=img_path)
                         print(f"✅ [图片] {mode_name} 发送成功")
                     else:
