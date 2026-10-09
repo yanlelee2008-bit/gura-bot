@@ -614,9 +614,10 @@ def roughen_text(text: str) -> str:
     return text
 
 
-# ==================== 📨 一次性发送（不拆分） ====================
+# ==================== 📨 一次性发送（文字 + 图片同条消息） ====================
 async def send_human_like(message, text, img_path=None):
-    """一次性把回复发完；如果附带图片，先发完整文字，再单独发图。"""
+    """一次性把回复发完：文字 + 图片放在同一条消息里，
+    Discord 会自动把图片显示在文字下方。"""
     try:
         text = (text or "……").strip() or "……"
 
@@ -633,20 +634,21 @@ async def send_human_like(message, text, img_path=None):
             except Exception:
                 pass
 
-        # 第一步：先发完整文字（不带图片）
-        try:
-            await safe_send(message, text)
-        except Exception as e:
-            print(f"⚠️ [send_human_like] 文字发送失败: {e}")
-            return
-
-        # 第二步：如果存在图片，等一小会儿，再单独发图
+        # 文字 + 图片一起发出（图片会自然出现在文字下方）
         if img_path and os.path.exists(img_path):
-            await asyncio.sleep(random.uniform(0.3, 0.8))
             try:
-                await safe_send(message, "📷", img_path=img_path)
+                await safe_send(message, text, img_path=img_path)
             except Exception as e:
-                print(f"⚠️ [send_human_like] 图片发送失败: {e}")
+                print(f"⚠️ [send_human_like] 图文发送失败，尝试只发文字: {e}")
+                try:
+                    await safe_send(message, text)
+                except Exception as e2:
+                    print(f"⚠️ [send_human_like] 纯文字也失败: {e2}")
+        else:
+            try:
+                await safe_send(message, text)
+            except Exception as e:
+                print(f"⚠️ [send_human_like] 文字发送失败: {e}")
 
     except Exception as e:
         import traceback
@@ -1875,7 +1877,7 @@ async def on_ready():
     print(f"📢 最近聊天流: 前 {HISTORY_RECENT_FOCUS} 条（允许 AI 自然提一嘴，最多 3 件事）")
     print(f"📝 timeout_list.txt 路径: {TIMEOUT_LIST_FILE}")
     print(f"🖼️ example 图片目录: {EXAMPLE_IMAGE_DIR}")
-    print(f"🧬 真人化引擎：已启用（长回复 80~250字 / 一次发完 / 图片最后贴）")
+    print(f"🧬 真人化引擎：已启用（长回复 80~250字 / 图文一条消息发出）")
     print(f"🎯 @聚焦模式：专门 @ 机器人时，只读该用户最近 10 条消息，不看旁观者")
     print("----------------------------------------")
     await load_timeout_list()
@@ -3241,7 +3243,7 @@ async def on_message(message):
                         print(f"⚠️ [图片] 回退到: {img_path} 是否存在: {os.path.exists(img_path)}")
 
                     if os.path.exists(img_path):
-                        # ★ 一次性发完整文字 + 最后单独发图
+                        # ★ 图文一条消息：文字在上，图片在下
                         await send_human_like(message, text if text else "……", img_path=img_path)
                         print(f"✅ [图片] {mode_name} 发送成功")
                     else:
